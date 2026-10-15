@@ -116,6 +116,7 @@ test("навигация как в редакторе, отмена пресет
 test("модели iPhone, ракурсы, изображение, отмена и сохранение проекта", async ({ page }) => {
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await start(page);
+  await expect(page.locator(".screen-size")).toHaveText("1290 × 2796 px");
   await page.locator('input[type="file"]').setInputFiles({ name: "экран.png", mimeType: "image/png", buffer: testImage() });
   await expect(page.getByText("экран.png", { exact: true })).toBeVisible();
   await page.getByLabel("Разрешение", { exact: true }).selectOption("1200");
@@ -123,6 +124,7 @@ test("модели iPhone, ракурсы, изображение, отмена 
   await page.getByRole("tab", { name: "Экран", exact: true }).click();
   await page.getByRole("spinbutton", { name: "Отражения на стекле", exact: true }).fill("0");
   await device(page, "iPhone 18 Pro Max"); await ready(page);
+  await expect(page.locator(".screen-size")).toHaveText("1320 × 2868 px");
   for (const finish of ["Glacier", "Burgundy", "Silver", "Black"]) {
     await choose(page, "Цвет корпуса", finish); await ready(page);
     await expect(page.getByRole("combobox", { name: "Цвет корпуса", exact: true })).toContainText(finish);
@@ -220,9 +222,12 @@ test("Android, Duo, MacBook и монитор: экран без зеркала,
     expect(quad.blue.x, `${label}: синий должен быть слева`).toBeLessThan(quad.yellow.x);
     expect(quad.red.y, `${label}: красный должен быть сверху`).toBeLessThan(quad.blue.y);
   };
-  for (const name of ["Galaxy S26 Ultra", "MacBook Pro 14″", "Pro Display XDR"]) {
+  // Подсказка размера скриншота — родное разрешение устройства.
+  const shotSize = { "Galaxy S26 Ultra": "1440 × 3120 px", "MacBook Pro 14″": "3024 × 1964 px", "Pro Display XDR": "6016 × 3384 px" };
+  for (const [name, size] of Object.entries(shotSize)) {
     await device(page, name); await ready(page);
     await expect(page.getByText("quad.png", { exact: true })).toBeVisible();
+    await expect(page.locator(".screen-size")).toHaveText(size);
     await preset(page, "Прямо");
     await check(name);
   }
@@ -237,6 +242,8 @@ test("Android, Duo, MacBook и монитор: экран без зеркала,
     await page.getByRole("button", { name: fold, exact: true }).click(); await ready(page);
     await check(`iPhone Duo, ${fold}`);
   }
+  // У вымышленного Duo нет родного разрешения: размер измеряется по экрану модели.
+  await expect(page.locator(".screen-size")).toHaveText("1290 × 1865 px");
   // У сложенного Duo изображение на внешнем экране с вырезом камеры.
   await expect(page.getByRole("checkbox", { name: "Вырез камеры" })).toBeVisible();
   const saved = page.waitForEvent("download");

@@ -120,6 +120,8 @@ svg { flex-shrink: 0; }
 .section-heading { display: flex; justify-content: space-between; align-items: center; gap: var(--space-sm); min-height: 18px; margin-block-end: var(--space-md); }
 .section-heading h2, .section-heading h3 { font-weight: 550; font-size: var(--fs-body-compact); color: var(--fg); }
 .screen-heading { margin-block: var(--space-lg) var(--space-sm); }
+.screen-heading-meta { display: flex; align-items: center; gap: var(--space-xs); min-width: 0; }
+.screen-size { color: var(--fg-muted); font-size: var(--fs-micro-compact); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .upload-card { display: flex; align-items: center; width: 100%; gap: var(--space-sm); border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-3); padding: var(--space-sm) 10px; text-align: left; min-height: 44px; }
 .demo-upload { border-style: dashed; }
 .upload-icon { display: grid; place-items: center; width: 24px; height: 25px; color: var(--fg-muted); flex-shrink: 0; }

@@ -62,6 +62,8 @@ export function Studio() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tab, setTab] = useState<"camera" | "screen" | "scene">("camera");
   const [modelState, setModelState] = useState<ModelState>({ status: "loading" });
+  /** Активная область экрана, измеренная по модели. */
+  const [screenSize, setScreenSize] = useState<{ width: number; height: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [loadingImage, setLoadingImage] = useState(false);
   const [capturing, setCapturing] = useState<"site" | "figma" | null>(null);
@@ -77,6 +79,10 @@ export function Studio() {
   const distanceUnit = model.unit;
   const presets = PRESETS.filter((preset) => !preset.phoneOnly || model.kind === "phone" || model.kind === "foldable");
   const hasCutout = activeScreen(settings.device, settings.fold).cutout.length > 0;
+  /** Размер скриншота для экрана: родное разрешение устройства, у вымышленного Duo — измеренный по модели. */
+  const nativePixels = activeScreen(settings.device, settings.fold).pixels;
+  const shotSize = nativePixels ? { width: nativePixels[0], height: nativePixels[1] } : screenSize;
+  const mismatch = !image.demo && shotSize !== null && Math.abs(Math.log(image.width / image.height / (shotSize.width / shotSize.height))) > 0.01;
 
   const showToast = useCallback((text: string, error = false) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -246,7 +252,7 @@ export function Studio() {
   return <MotionConfig reducedMotion="user"><main className="studio-shell">
     <div className="editor-layout">
       <section className="stage-column" aria-label="Сцена">
-        <Viewport settings={settings} image={image} sceneRef={sceneRef} onCamera={onCamera} onModel={setModelState} onError={showError} modelState={modelState} navigation={navigation} onResetCamera={resetCamera} onDropFile={(file) => void openFile(file)} busy={busy}
+        <Viewport settings={settings} image={image} sceneRef={sceneRef} onCamera={onCamera} onModel={setModelState} onScreen={setScreenSize} onError={showError} modelState={modelState} navigation={navigation} onResetCamera={resetCamera} onDropFile={(file) => void openFile(file)} busy={busy}
           topLeft={<FluidChoice label="Ракурс" value={activePreset} placeholder="Свой ракурс" icon={Camera} className="preset-choice" disabled={busy} items={presets.map((preset) => ({ id: preset.id, label: preset.name }))} onChange={(id) => { const preset = presets.find((item) => item.id === id); if (preset) { change("camera", { ...preset.camera }); setActivePreset(id); } }} />}
           topRight={<div className="header-actions"><Button variant="ghost" size="icon-compact" aria-label="Отменить (Ctrl+Z)" title="Отменить · Ctrl+Z" disabled={!history.past.length || busy} onClick={() => { dispatch({ type: "undo" }); setActivePreset(""); }}><Undo2 /></Button><Button variant="ghost" size="icon-compact" aria-label="Повторить (Ctrl+Shift+Z)" title="Повторить · Ctrl+Shift+Z" disabled={!history.future.length || busy} onClick={() => dispatch({ type: "redo" })}><Redo2 /></Button><span className="toolbar-divider" /><Button variant="ghost" size="icon-compact" aria-label="Сохранить проект (Ctrl+S)" title="Сохранить проект · Ctrl+S" onClick={() => void saveProject()}><Save /></Button><ThemeToggle /><Button variant="ghost" size="icon-compact" aria-label="Горячие клавиши" title="Горячие клавиши · ?" onClick={() => helpRef.current?.showModal()}><CircleHelp /></Button></div>} />
       </section>
@@ -257,10 +263,10 @@ export function Studio() {
             <div className="property-row"><span>Модель</span><FluidChoice label="Модель устройства" value={settings.device} items={DEVICES.map((item) => ({ id: item.id, label: item.name, group: item.group }))} className="device-choice" onChange={(id) => { const selected = DEVICES.find((item) => item.id === id); if (selected) mutate((current) => withScreen(current, selected.id, current.settings.fold)); }} /></div>
             <div className="property-row"><span>Цвет</span><FluidChoice label="Цвет корпуса" value={settings.finish} items={model.finishes.map((item) => ({ id: item.id, label: item.name, color: item.color }))} className="finish-trigger" onChange={(id) => { const selected = model.finishes.find((item) => item.id === id); if (selected) change("finish", selected.id); }} /></div>
             {model.fold && <div className="property-row"><span>Сгиб</span><Segmented className="segmented fold-options" label="Положение шарнира" value={settings.fold} items={FOLD_OPTIONS} onChange={(fold) => mutate((current) => withScreen(current, current.settings.device, fold))} /></div>}
-            <div className="section-heading screen-heading"><h2>Экран</h2>{!image.demo && <button className="quiet-icon" aria-label="Убрать изображение" title="Вернуть демо-экран" onClick={() => mutate((current) => ({ ...current, image: INITIAL_DOCUMENT.image }))}><X size={13} /></button>}</div>
+            <div className="section-heading screen-heading"><h2>Экран</h2><span className="screen-heading-meta">{shotSize && <span className="screen-size" title="Скриншот такого размера или тех же пропорций ляжет на экран без обрезки и полей">{shotSize.width} × {shotSize.height} px</span>}{!image.demo && <button className="quiet-icon" aria-label="Убрать изображение" title="Вернуть демо-экран" onClick={() => mutate((current) => ({ ...current, image: INITIAL_DOCUMENT.image }))}><X size={13} /></button>}</span></div>
             <button className={`upload-card${image.demo ? " demo-upload" : ""}`} disabled={loadingImage} onClick={() => fileRef.current?.click()} aria-label="Загрузить изображение на экран" title="Загрузить изображение или открыть проект · Ctrl+O">
               {image.demo ? <span className="upload-icon"><ImagePlus size={20} /></span> : <span className="upload-thumb"><img src={image.url} alt="Загруженное изображение" /></span>}
-              <span className="upload-copy"><strong>{capturing === "site" ? "Снимаем сайт…" : capturing === "figma" ? "Загружаем фрейм из Figma…" : loadingImage ? "Загружаем…" : image.demo ? "Загрузить изображение" : image.name}</strong><span>{capturing ? "Обычно несколько секунд" : image.demo ? "PNG, JPG, WebP или вставьте · Ctrl+V" : `${image.width} × ${image.height}`}</span></span><Upload size={14} />
+              <span className="upload-copy"><strong>{capturing === "site" ? "Снимаем сайт…" : capturing === "figma" ? "Загружаем фрейм из Figma…" : loadingImage ? "Загружаем…" : image.demo ? "Загрузить изображение" : image.name}</strong><span>{capturing ? "Обычно несколько секунд" : image.demo ? "PNG, JPG, WebP или вставьте · Ctrl+V" : `${image.width} × ${image.height}${mismatch ? settings.screen.fit === "cover" ? " · края обрежутся" : " · останутся поля" : ""}`}</span></span><Upload size={14} />
             </button>
             <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,.json" className="sr-only" tabIndex={-1} aria-label="Файл изображения или проекта" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void openFile(file); }} />
             <form className="link-field" onSubmit={(event) => { event.preventDefault(); void openLink(linkDraft); }}>
