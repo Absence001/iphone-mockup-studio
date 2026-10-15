@@ -13,6 +13,7 @@ export type NavigationCommand = { id: number; type: "fit" | "zoom-in" | "zoom-ou
 interface ViewportProps {
   settings: Settings; image: ScreenImage; backdrop: ScreenImage; sceneRef: RefObject<StudioScene | null>;
   onCamera: (camera: CameraSettings) => void; onModel: (state: ModelState) => void;
+  onScreen: (size: { width: number; height: number }) => void;
   onError: (message: string) => void; modelState: ModelState; navigation: NavigationCommand | null;
   /** Видео на экране пошло или встало. */
   onVideo: (playing: boolean) => void;
@@ -33,7 +34,7 @@ const WHEEL_ZOOM = 0.0015;
 /** Шаг кнопок «плюс» и «минус», он же шаг клавиш + и −. */
 const BUTTON_ZOOM = 1.25;
 
-export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onModel, onError, onVideo, modelState, navigation, onResetCamera, onDropFile, busy, topLeft, topRight }: ViewportProps) {
+export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onModel, onScreen, onError, onVideo, modelState, navigation, onResetCamera, onDropFile, busy, topLeft, topRight }: ViewportProps) {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const initial = useRef(settings);
@@ -125,10 +126,10 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
     const host = canvasRef.current;
     if (!host) return;
     let scene: StudioScene | null = null;
-    try { scene = new StudioScene(host, initial.current, { camera: onCamera, model: onModel, video: onVideo }); sceneRef.current = scene; }
+    try { scene = new StudioScene(host, initial.current, { camera: onCamera, model: onModel, screen: onScreen, video: onVideo }); sceneRef.current = scene; }
     catch { onModel({ status: "error", message: "Не удалось запустить 3D. Включите аппаратное ускорение в браузере и нажмите «Повторить»." }); }
     return () => { scene?.dispose(); sceneRef.current = null; };
-  }, [generation, sceneRef, onCamera, onModel, onVideo]);
+  }, [generation, sceneRef, onCamera, onModel, onScreen, onVideo]);
   useEffect(() => { sceneRef.current?.update(settings); }, [settings, generation, sceneRef]);
   useEffect(() => {
     const scene = sceneRef.current;

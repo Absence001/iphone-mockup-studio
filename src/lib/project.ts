@@ -1,10 +1,13 @@
 import { INITIAL_DOCUMENT, type DocumentState } from "./history";
 import { deviceFinish } from "./models";
 import { backgroundPreset } from "./backgrounds";
-import { BACKGROUND_MODES, DEFAULT_SETTINGS, DEVICE_IDS, FINISH_IDS, FOLDS, type ScreenKind, type Settings } from "./settings";
+import { BACKGROUND_MODES, DEFAULT_SETTINGS, DEVICE_IDS, FINISH_IDS, FOLD_OPEN, LID_DEFAULT, LID_MAX, type ScreenKind, type Settings } from "./settings";
 
 /** Допустимые вложения проекта: картинка или видео в виде data:-строки. */
 const ASSET_DATA = /^data:(image\/(png|jpeg|webp)|video\/(mp4|webm|quicktime));base64,/i;
+
+/** Проекты до ползунка сгиба хранили одно из трёх положений шарнира. */
+const LEGACY_FOLDS: Record<string, number> = { open: 180, book: 110, closed: 0 };
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Не удалось открыть проект: неверный формат файла.");
@@ -42,7 +45,8 @@ export function parseProject(text: string): {
   const settings: Settings = {
     device: option(s.device, DEVICE_IDS), finish: option(s.finish, FINISH_IDS),
     // Проекты до появления Duo сохранялись без положения шарнира.
-    fold: s.fold === undefined ? "open" : option(s.fold, FOLDS),
+    fold: s.fold === undefined ? FOLD_OPEN : typeof s.fold === "string" ? LEGACY_FOLDS[option(s.fold, Object.keys(LEGACY_FOLDS))] : number(s, "fold", 0, FOLD_OPEN),
+    lid: s.lid === undefined ? LID_DEFAULT : number(s, "lid", 0, LID_MAX),
     aspect: option(s.aspect, ["16:9", "4:3", "1:1", "4:5", "9:16"]), resolution: number(s, "resolution", 256, 3840),
     camera: {
       projection: option(c.projection, ["perspective", "orthographic"]), azimuth: number(c, "azimuth", -360, 360), elevation: number(c, "elevation", -89, 89),

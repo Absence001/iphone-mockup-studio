@@ -10,7 +10,7 @@ import { FluidChoice } from "./fluid-choice";
 import { ThemeToggle } from "./theme-toggle";
 import { Control, Segmented } from "./control";
 import { Viewport, type ModelState, type NavigationCommand } from "./viewport";
-import { DEFAULT_CAMERA, DEFAULT_SETTINGS, PRESETS, clamp, exportSize, videoEnd, videoLength, type Aspect, type CameraSettings, type Device, type Fold, type ScreenFit, type ScreenKind, type Settings } from "@/lib/settings";
+import { DEFAULT_CAMERA, DEFAULT_SETTINGS, FOLD_OPEN, FOLD_OUTER_BELOW, LID_MAX, PRESETS, clamp, exportSize, videoEnd, videoLength, type Aspect, type CameraSettings, type Device, type ScreenFit, type ScreenKind, type Settings } from "@/lib/settings";
 import { BACKGROUNDS, backgroundCss, backgroundPreset } from "@/lib/backgrounds";
 import { DEVICES, activeScreen, deviceFinish, deviceModel } from "@/lib/models";
 import { EMPTY_ASSET, INITIAL_DOCUMENT, INITIAL_HISTORY, historyReducer, type DocumentState } from "@/lib/history";
@@ -30,13 +30,11 @@ function fitForImage(width: number, height: number, screenRatio: number): Screen
 }
 
 /** Смена модели или сгиба меняет экран: вписывание пересчитывается под него. */
-function withScreen(current: DocumentState, device: Device, fold: Fold): DocumentState {
+function withScreen(current: DocumentState, device: Device, fold: number): DocumentState {
   const settings = { ...current.settings, device, fold, finish: deviceFinish(device, current.settings.finish).id };
   if (current.image.demo) return { ...current, settings };
   return { ...current, settings: { ...settings, screen: { ...settings.screen, fit: fitForImage(current.image.width, current.image.height, activeScreen(device, fold).aspect) } } };
 }
-
-const FOLD_OPTIONS: { id: Fold; label: string }[] = [{ id: "open", label: "Раскрыт" }, { id: "book", label: "Книжкой" }, { id: "closed", label: "Сложен" }];
 
 const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
 const VIDEO_TYPES = ["video/mp4", "video/webm", "video/quicktime"];
@@ -92,6 +90,8 @@ export function Studio() {
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tab, setTab] = useState<"camera" | "screen" | "scene">("camera");
   const [modelState, setModelState] = useState<ModelState>({ status: "loading" });
+  /** Активная область экрана, измеренная по модели. */
+  const [screenSize, setScreenSize] = useState<{ width: number; height: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [format, setFormat] = useState<"png" | "webm">("png");
@@ -111,8 +111,12 @@ export function Studio() {
   const movieReady = image.kind === "video" && image.duration > 0 && videoExportReady;
   const model = deviceModel(settings.device);
   const distanceUnit = model.unit;
-  const presets = PRESETS.filter((preset) => !preset.phoneOnly || model.kind === "phone" || model.kind === "foldable");
+  const presets = PRESETS.filter((preset) => !preset.handheld || model.kind === "phone" || model.kind === "foldable" || model.kind === "tablet");
   const hasCutout = activeScreen(settings.device, settings.fold).cutout.length > 0;
+  /** Размер скриншота для экрана: родное разрешение устройства, у вымышленного Duo — измеренный по модели. */
+  const nativePixels = activeScreen(settings.device, settings.fold).pixels;
+  const shotSize = nativePixels ? { width: nativePixels[0], height: nativePixels[1] } : screenSize;
+  const mismatch = !image.demo && shotSize !== null && Math.abs(Math.log(image.width / image.height / (shotSize.width / shotSize.height))) > 0.01;
 
   const showToast = useCallback((text: string, error = false) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -228,7 +232,8 @@ export function Studio() {
     const link = normalizeLink(text);
     if (!link) { showError("Это не похоже на ссылку. Вставьте адрес вида https://example.com."); return; }
     const { width, height } = sceneRef.current?.screenSize ?? { width: 1290, height: 2796 };
-    const desktop = model.kind === "laptop" || model.kind === "display";
+    // Safari на iPad по умолчанию запрашивает настольную версию сайта.
+    const desktop = model.kind === "laptop" || model.kind === "display" || model.kind === "tablet";
     if (isFigmaLink(link)) { await shootLink(link, width, height, desktop); return; }
     const request = ++uploadRequest.current;
     setLoadingImage(true); setCapturing("site");
@@ -342,7 +347,7 @@ export function Studio() {
   return <MotionConfig reducedMotion="user"><main className="studio-shell">
     <div className="editor-layout">
       <section className="stage-column" aria-label="Сцена">
-        <Viewport settings={settings} image={image} backdrop={backdrop} sceneRef={sceneRef} onCamera={onCamera} onModel={setModelState} onError={showError} onVideo={onVideo} modelState={modelState} navigation={navigation} onResetCamera={resetCamera} onDropFile={(file) => void openFile(file)} busy={busy}
+        <Viewport settings={settings} image={image} backdrop={backdrop} sceneRef={sceneRef} onCamera={onCamera} onModel={setModelState} onScreen={setScreenSize} onError={showError} onVideo={onVideo} modelState={modelState} navigation={navigation} onResetCamera={resetCamera} onDropFile={(file) => void openFile(file)} busy={busy}
           topLeft={<FluidChoice label="Ракурс" value={activePreset} placeholder="Свой ракурс" icon={Camera} className="preset-choice" disabled={busy} items={presets.map((preset) => ({ id: preset.id, label: preset.name }))} onChange={(id) => { const preset = presets.find((item) => item.id === id); if (preset) { change("camera", { ...preset.camera }); setActivePreset(id); } }} />}
           topRight={<div className="header-actions"><Button variant="ghost" size="icon-compact" aria-label="Отменить (Ctrl+Z)" title="Отменить · Ctrl+Z" disabled={!history.past.length || busy} onClick={() => { dispatch({ type: "undo" }); setActivePreset(""); }}><Undo2 /></Button><Button variant="ghost" size="icon-compact" aria-label="Повторить (Ctrl+Shift+Z)" title="Повторить · Ctrl+Shift+Z" disabled={!history.future.length || busy} onClick={() => dispatch({ type: "redo" })}><Redo2 /></Button><span className="toolbar-divider" /><Button variant="ghost" size="icon-compact" aria-label="Сохранить проект (Ctrl+S)" title="Сохранить проект · Ctrl+S" onClick={() => void saveProject()}><Save /></Button><ThemeToggle /><Button variant="ghost" size="icon-compact" aria-label="Горячие клавиши" title="Горячие клавиши · ?" onClick={() => helpRef.current?.showModal()}><CircleHelp /></Button></div>} />
       </section>
@@ -352,11 +357,12 @@ export function Studio() {
           <div className="asset-settings">
             <div className="property-row"><span>Модель</span><FluidChoice label="Модель устройства" value={settings.device} items={DEVICES.map((item) => ({ id: item.id, label: item.name, group: item.group }))} className="device-choice" onChange={(id) => { const selected = DEVICES.find((item) => item.id === id); if (selected) mutate((current) => withScreen(current, selected.id, current.settings.fold)); }} /></div>
             <div className="property-row"><span>Цвет</span><FluidChoice label="Цвет корпуса" value={settings.finish} items={model.finishes.map((item) => ({ id: item.id, label: item.name, color: item.color }))} className="finish-trigger" onChange={(id) => { const selected = model.finishes.find((item) => item.id === id); if (selected) change("finish", selected.id); }} /></div>
-            {model.fold && <div className="property-row"><span>Сгиб</span><Segmented className="segmented fold-options" label="Положение шарнира" value={settings.fold} items={FOLD_OPTIONS} onChange={(fold) => mutate((current) => withScreen(current, current.settings.device, fold))} /></div>}
-            <div className="section-heading screen-heading"><h2>Экран</h2>{!image.demo && <button className="quiet-icon" aria-label="Убрать изображение" title="Вернуть демо-экран" onClick={() => mutate((current) => ({ ...current, image: INITIAL_DOCUMENT.image }))}><X size={13} /></button>}</div>
+            {model.fold && <div className="hinge-control"><Control label="Раскрытие телефона" value={settings.fold} min={0} max={FOLD_OPEN} unit="°" onChange={(fold) => mutate((current) => withScreen(current, current.settings.device, fold), "fold")} /><p>{settings.fold < FOLD_OUTER_BELOW ? "Изображение на внешнем экране" : `На внутреннем экране · ниже ${FOLD_OUTER_BELOW}° — на внешнем`}</p></div>}
+            {model.lid && <div className="hinge-control"><Control label="Раскрытие крышки" value={settings.lid} min={0} max={LID_MAX} unit="°" onChange={(lid) => change("lid", lid, "lid")} /></div>}
+            <div className="section-heading screen-heading"><h2>Экран</h2><span className="screen-heading-meta">{shotSize && <span className="screen-size" title="Скриншот такого размера или тех же пропорций ляжет на экран без обрезки и полей">{shotSize.width} × {shotSize.height} px</span>}{!image.demo && <button className="quiet-icon" aria-label="Убрать изображение" title="Вернуть демо-экран" onClick={() => mutate((current) => ({ ...current, image: INITIAL_DOCUMENT.image }))}><X size={13} /></button>}</span></div>
             <button className={`upload-card${image.demo ? " demo-upload" : ""}`} disabled={loadingImage} onClick={() => fileRef.current?.click()} aria-label="Загрузить изображение или видео на экран" title="Загрузить изображение, видео или открыть проект · Ctrl+O">
               {image.demo ? <span className="upload-icon"><ImagePlus size={20} /></span> : image.kind === "video" ? <span className="upload-icon"><Film size={20} /></span> : <span className="upload-thumb"><img src={image.url} alt="Загруженное изображение" /></span>}
-              <span className="upload-copy"><strong>{capturing === "site" ? "Снимаем сайт…" : capturing === "figma" ? "Загружаем фрейм из Figma…" : loadingImage ? "Загружаем…" : image.demo ? "Загрузить изображение" : image.name}</strong><span>{capturing ? "Обычно несколько секунд" : image.demo ? "PNG, JPG, WebP, MP4 или вставьте · Ctrl+V" : image.kind === "video" ? `${image.width} × ${image.height} · ${timecode(image.duration)}` : `${image.width} × ${image.height}`}</span></span><Upload size={14} />
+              <span className="upload-copy"><strong>{capturing === "site" ? "Снимаем сайт…" : capturing === "figma" ? "Загружаем фрейм из Figma…" : loadingImage ? "Загружаем…" : image.demo ? "Загрузить изображение" : image.name}</strong><span>{capturing ? "Обычно несколько секунд" : image.demo ? "PNG, JPG, WebP, MP4 или вставьте · Ctrl+V" : `${image.width} × ${image.height}${image.kind === "video" ? ` · ${timecode(image.duration)}` : ""}${mismatch ? settings.screen.fit === "cover" ? " · края обрежутся" : " · останутся поля" : ""}`}</span></span><Upload size={14} />
             </button>
             <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,video/quicktime,.json" className="sr-only" tabIndex={-1} aria-label="Файл изображения, видео или проекта" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void openFile(file); }} />
             <form className="link-field" onSubmit={(event) => { event.preventDefault(); void openLink(linkDraft); }}>
@@ -428,6 +434,6 @@ export function Studio() {
         <span className="toast-icon">{toast.error ? <CircleHelp size={16} /> : <Check size={16} />}</span><span>{toast.text}</span><button aria-label="Закрыть уведомление" onClick={() => setToast(null)}><X size={13} /></button></motion.div>}
     </AnimatePresence>
     {pagePick && <PagePicker key={pagePick.url} preview={pagePick} onCancel={() => closePagePick()} onConfirm={(scrollY) => closePagePick(scrollY)} />}
-    <dialog ref={helpRef} className="help-dialog"><div className="dialog-heading"><span className="dialog-icon"><Layers2 size={22} /></span><button className="icon-button" aria-label="Закрыть справку" onClick={() => helpRef.current?.close()}><X size={18} /></button></div><h2>Привычные движения.</h2><p>Всё нужное — под рукой.</p><dl className="shortcut-list">{[["Вращать модель", "Перетаскивание / стрелки"], ["Перемещать рабочую область", "Space + drag / средняя кнопка"], ["Масштаб под курсором", "Ctrl + колёсико"], ["Рука / вращение", "H / V"], ["Уместить холст", "Shift + 1 / F"], ["Масштаб 100%", "0"], ["Отменить / повторить", "Ctrl + Z / Ctrl + Shift + Z"], ["Открыть экран или проект", "Ctrl + O"], ["Вставить картинку или ссылку", "Ctrl + V"], ["Сохранить проект", "Ctrl + S"], ["Экспорт PNG", "Ctrl + Shift + E"]].map(([name, shortcut]) => <div key={name}><dt>{name}</dt><dd>{shortcut}</dd></div>)}</dl><p className="help-note">Масштаб рабочей области не влияет на экспорт. На Mac используйте ⌘ вместо Ctrl. Все файлы обрабатываются на вашем компьютере.</p><details className="model-credits"><summary>Авторы 3D-моделей</summary><p>iPhone 15 Pro Max и Pro Display XDR — polyman, CC BY 4.0. iPhone 18 Pro Max и iPhone Duo — extraakash, Sketchfab Standard. Galaxy S26 Ultra — gadirovsaid7, CC BY 4.0. MacBook Pro 14″ — Apple User, Sketchfab Standard. Файлы предоставлены пользователем. Названия моделей соответствуют метаданным файлов.</p></details><button className="small-button reset-project" onClick={() => { mutate(() => structuredClone(INITIAL_DOCUMENT)); setActivePreset("front"); helpRef.current?.close(); showToast("Сцена сброшена. Изменение можно отменить."); }}><RotateCcw size={14} /> Сбросить всю сцену</button></dialog>
+    <dialog ref={helpRef} className="help-dialog"><div className="dialog-heading"><span className="dialog-icon"><Layers2 size={22} /></span><button className="icon-button" aria-label="Закрыть справку" onClick={() => helpRef.current?.close()}><X size={18} /></button></div><h2>Привычные движения.</h2><p>Всё нужное — под рукой.</p><dl className="shortcut-list">{[["Вращать модель", "Перетаскивание / стрелки"], ["Перемещать рабочую область", "Space + drag / средняя кнопка"], ["Масштаб под курсором", "Ctrl + колёсико"], ["Рука / вращение", "H / V"], ["Уместить холст", "Shift + 1 / F"], ["Масштаб 100%", "0"], ["Отменить / повторить", "Ctrl + Z / Ctrl + Shift + Z"], ["Открыть экран или проект", "Ctrl + O"], ["Вставить картинку или ссылку", "Ctrl + V"], ["Сохранить проект", "Ctrl + S"], ["Экспорт PNG", "Ctrl + Shift + E"]].map(([name, shortcut]) => <div key={name}><dt>{name}</dt><dd>{shortcut}</dd></div>)}</dl><p className="help-note">Масштаб рабочей области не влияет на экспорт. На Mac используйте ⌘ вместо Ctrl. Все файлы обрабатываются на вашем компьютере.</p><details className="model-credits"><summary>Авторы 3D-моделей</summary><p>iPhone 15 Pro и 15 Pro Max, Pro Display XDR, Apple Watch Ultra 2 и Series 9 — polyman, CC BY 4.0. iPhone 18 Pro, 18 Pro Max и iPhone Duo — extraakash, Sketchfab Standard. iPhone 17 Pro и 17 Pro Max, iPad Pro 13″ и MacBook Pro 14″ — Apple User, Sketchfab Standard. MacBook Air 13″ и iMac 24″ — valentinomyhero, CC BY 4.0. Galaxy S26 Ultra — gadirovsaid7, CC BY 4.0. Модели взяты с Sketchfab; названия соответствуют метаданным файлов.</p></details><button className="small-button reset-project" onClick={() => { mutate(() => structuredClone(INITIAL_DOCUMENT)); setActivePreset("front"); helpRef.current?.close(); showToast("Сцена сброшена. Изменение можно отменить."); }}><RotateCcw size={14} /> Сбросить всю сцену</button></dialog>
   </main></MotionConfig>;
 }

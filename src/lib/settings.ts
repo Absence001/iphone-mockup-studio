@@ -3,13 +3,18 @@ export type BackgroundMode = "solid" | "gradient" | "preset" | "custom" | "trans
 export type Lighting = "soft" | "studio" | "rim";
 export type ScreenFit = "cover" | "contain";
 export type Aspect = "16:9" | "4:3" | "1:1" | "4:5" | "9:16";
-export type Device = "iphone15" | "iphone18" | "iphoneDuo" | "galaxyS26Ultra" | "macbookPro14" | "proDisplayXdr";
-export type Finish = "black" | "glacier" | "burgundy" | "silver" | "starWhite" | "violet" | "spaceBlack";
-export type Fold = "open" | "book" | "closed";
+export type Device = "iphone15Pro" | "iphone15" | "iphone17Pro" | "iphone17" | "iphone18Pro" | "iphone18" | "iphoneDuo" | "galaxyS26Ultra" | "ipadPro13" | "macbookAir13" | "macbookPro14" | "imac24" | "proDisplayXdr" | "watchUltra2" | "watchSeries9";
+export type Finish = "black" | "white" | "blue" | "natural" | "glacier" | "burgundy" | "silver" | "starWhite" | "violet" | "spaceBlack" | "cosmicOrange" | "deepBlue" | "skyBlue" | "starlight";
 
-export const DEVICE_IDS: readonly Device[] = ["iphone15", "iphone18", "iphoneDuo", "galaxyS26Ultra", "macbookPro14", "proDisplayXdr"];
-export const FINISH_IDS: readonly Finish[] = ["black", "glacier", "burgundy", "silver", "starWhite", "violet", "spaceBlack"];
-export const FOLDS: readonly Fold[] = ["open", "book", "closed"];
+export const DEVICE_IDS: readonly Device[] = ["iphone15Pro", "iphone15", "iphone17Pro", "iphone17", "iphone18Pro", "iphone18", "iphoneDuo", "galaxyS26Ultra", "ipadPro13", "macbookAir13", "macbookPro14", "imac24", "proDisplayXdr", "watchUltra2", "watchSeries9"];
+export const FINISH_IDS: readonly Finish[] = ["black", "white", "blue", "natural", "glacier", "burgundy", "silver", "starWhite", "violet", "spaceBlack", "cosmicOrange", "deepBlue", "skyBlue", "starlight"];
+/** Угол между половинами складного телефона: 180° — раскрыт, 0° — сложен. */
+export const FOLD_OPEN = 180;
+/** Ниже прямого угла изображение переходит на внешний экран. */
+export const FOLD_OUTER_BELOW = 90;
+/** Крышка открывается до упора примерно на 135°; в файлах моделей она стоит около 110°. */
+export const LID_DEFAULT = 110;
+export const LID_MAX = 135;
 export const BACKGROUND_MODES: readonly BackgroundMode[] = ["solid", "gradient", "preset", "custom", "transparent"];
 
 /** Что лежит на экране устройства. */
@@ -30,8 +35,10 @@ export interface CameraSettings {
 export interface Settings {
   device: Device;
   finish: Finish;
-  /** Положение шарнира складного телефона; у остальных моделей не используется. */
-  fold: Fold;
+  /** Угол между половинами складного телефона в градусах; у остальных моделей не используется. */
+  fold: number;
+  /** Раскрытие крышки ноутбука в градусах: 0 — закрыт. */
+  lid: number;
   camera: CameraSettings;
   screen: { fit: ScreenFit; scale: number; x: number; y: number; island: boolean; reflection: number };
   background: {
@@ -56,8 +63,8 @@ export interface Preset {
   id: string;
   name: string;
   description: string;
-  /** Только для телефонов: альбомный ракурс у ноутбука и монитора бессмыслен. */
-  phoneOnly?: boolean;
+  /** Только для телефонов и планшетов: альбомный ракурс у ноутбука, монитора и часов бессмыслен. */
+  handheld?: boolean;
   camera: CameraSettings;
   preview: [number, number, number];
 }
@@ -72,7 +79,7 @@ export const DEFAULT_CAMERA: CameraSettings = {
 };
 
 export const DEFAULT_SETTINGS: Settings = {
-  device: "iphone15", finish: "black", fold: "open",
+  device: "iphone15", finish: "black", fold: FOLD_OPEN, lid: LID_DEFAULT,
   camera: { ...DEFAULT_CAMERA },
   screen: { fit: "cover", scale: 100, x: 0, y: 0, island: true, reflection: 12 },
   background: { mode: "solid", color: "#f4f4f4", secondary: "#d4d4d4", angle: 135, preset: "dawn", animated: true, speed: 100 },
@@ -89,7 +96,7 @@ export const PRESETS: Preset[] = [
   { id: "front", name: "Прямо", description: "Фронтальный вид без искажений", camera: { ...DEFAULT_CAMERA }, preview: [0, 0, 0] },
   { id: "hero", name: "Перспектива", description: "Крупный ближний торец, как на референсе", camera: { ...STUDIO_CAMERA, azimuth: 0, elevation: -57, roll: 0, focalLength: 22, distance: 1.65, zoom: 115, offsetY: 22 }, preview: [57, 0, 0] },
   { id: "top", name: "Сверху", description: "Плавное сокращение вдаль", camera: { ...STUDIO_CAMERA, azimuth: 24, elevation: 42, roll: -22, focalLength: 40, distance: 3.8 }, preview: [-40, -25, -22] },
-  { id: "landscape", name: "Горизонтально", description: "Телефон в альбомной ориентации", phoneOnly: true, camera: { ...STUDIO_CAMERA, azimuth: -12, elevation: 15, roll: 90, focalLength: 55, distance: 4.8 }, preview: [12, -12, 90] },
+  { id: "landscape", name: "Горизонтально", description: "Телефон или планшет в альбомной ориентации", handheld: true, camera: { ...STUDIO_CAMERA, azimuth: -12, elevation: 15, roll: 90, focalLength: 55, distance: 4.8 }, preview: [12, -12, 90] },
   { id: "back", name: "Сзади", description: "Корпус и блок камер", camera: { ...STUDIO_CAMERA, azimuth: 155, elevation: 12, roll: 10 }, preview: [10, 150, 10] },
 ];
 

@@ -1,9 +1,10 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { activeScreen, deviceFinish, deviceModel, type ScreenConfig } from "./models";
+import { deviceFinish, deviceModel, finishScreens, type DeviceModel, type ScreenConfig } from "./models";
 import { SpecularGlossinessPlugin } from "./spec-gloss";
-import { clamp, videoEnd, type CameraSettings, type Settings } from "./settings";
+import { recolor } from "./recolor";
+import { FOLD_OPEN, FOLD_OUTER_BELOW, clamp, videoEnd, type CameraSettings, type Settings } from "./settings";
 import { backgroundPreset, paintBackground } from "./backgrounds";
 import { StudioLight, shadowDirection } from "./studio-light";
 import { BackdropShadow, type ShadowOptions } from "./shadow";
@@ -12,6 +13,8 @@ type LoadState = { status: "loading" | "ready" | "error"; message?: string };
 type Callbacks = {
   camera: (camera: CameraSettings) => void;
   model: (state: LoadState) => void;
+  /** Активный экран сменился: его размер в пикселях. */
+  screen: (size: { width: number; height: number }) => void;
   /** Видео на экране пошло или встало: кнопка в панели идёт за сценой. */
   video?: (playing: boolean) => void;
 };
@@ -102,7 +105,8 @@ function screenFrame(mesh: THREE.Mesh, root: THREE.Object3D, mirror: boolean): S
   }
   normal.normalize();
   const toRoot = new THREE.Matrix4().copy(root.matrixWorld).invert().multiply(mesh.matrixWorld);
-  const toLocal = toRoot.clone().invert();
+  // Верх — ось Y сцены, а не файла: файл бывает повёрнут при загрузке.
+  const toLocal = mesh.matrixWorld.clone().invert();
   const v = new THREE.Vector3(0, 1, 0).transformDirection(toLocal).projectOnPlane(normal);
   if (v.lengthSq() < 1e-8) v.set(0, 0, -1).transformDirection(toLocal).projectOnPlane(normal);
   v.normalize();
@@ -132,7 +136,60 @@ function mapScreenUV(geometry: THREE.BufferGeometry, frame: ScreenFrame) {
 }
 
 /** Экран модели: у Duo их два, изображение выводится на активный. */
-interface ScreenSlot { mesh: THREE.Mesh; aspect: number; inset: [number, number]; cutout: THREE.Object3D[]; patch: THREE.Mesh | null }
+interface ScreenSlot { mesh: THREE.Mesh; aspect: number; inset: [number, number]; width?: number; cutout: THREE.Object3D[]; patch: THREE.Mesh | null }
+
+/**
+ * Насколько сложен телефон в каждый ключ клипа шарнира, в градусах: сумма
+ * поворотов всех суставов от первого кадра. Клип идёт с плавным разгоном,
+ * поэтому время под нужный угол ищется по этой таблице, а не пропорцией.
+ */
+function foldTable(clip: THREE.AnimationClip): { times: number[]; folded: number[] } {
+  const tracks = clip.tracks.filter((track): track is THREE.QuaternionKeyframeTrack => track instanceof THREE.QuaternionKeyframeTrack);
+  const times = Array.from(tracks[0]?.times ?? []);
+  const first = new THREE.Quaternion(), current = new THREE.Quaternion();
+  const folded = times.map((_, key) => tracks.reduce((sum, track) => {
+    if (track.times.length !== times.length) return sum;
+    first.fromArray(track.values, 0); current.fromArray(track.values, key * 4);
+    return sum + THREE.MathUtils.radToDeg(first.angleTo(current));
+  }, 0));
+  return { times, folded };
+}
+
+function clipTime({ times, folded }: { times: number[]; folded: number[] }, target: number) {
+  for (let key = 1; key < times.length; key++) {
+    if (folded[key] < target) continue;
+    const span = folded[key] - folded[key - 1];
+    return span > 0 ? THREE.MathUtils.lerp(times[key - 1], times[key], (target - folded[key - 1]) / span) : times[key];
+  }
+  return times.at(-1) ?? 0;
+}
+
+/** Крышка ноутбука: исходная поза и шарнир в координатах её родителя. */
+interface LidHinge { node: THREE.Object3D; position: THREE.Vector3; quaternion: THREE.Quaternion; pivot: THREE.Vector3; axis: THREE.Vector3; angle: number }
+
+/**
+ * Шарнир крышки: задний верхний край корпуса под ней. Ось направлена так,
+ * чтобы положительный поворот закрывал крышку, то есть вёл её к клавиатуре.
+ */
+function lidHinge(root: THREE.Object3D, { node: name, angle, hinge }: NonNullable<DeviceModel["lid"]>): LidHinge | null {
+  const node = root.getObjectByName(name);
+  if (!node?.parent) return null;
+  const lid = new THREE.Box3().setFromObject(node);
+  const base = new THREE.Box3();
+  root.traverse((object) => {
+    if (!(object instanceof THREE.Mesh)) return;
+    let inside = false;
+    object.traverseAncestors((ancestor) => { if (ancestor === node) inside = true; });
+    if (!inside) base.expandByObject(object);
+  });
+  const lidCenter = lid.getCenter(new THREE.Vector3()), baseCenter = base.getCenter(new THREE.Vector3());
+  const back = lidCenter.z < baseCenter.z;
+  const toParent = node.parent.matrixWorld.clone().invert();
+  const thickness = base.max.y - base.min.y;
+  const pivot = new THREE.Vector3(0, base.max.y - hinge[0] * thickness, back ? base.min.z + hinge[1] * thickness : base.max.z - hinge[1] * thickness).applyMatrix4(toParent);
+  const axis = new THREE.Vector3(back ? 1 : -1, 0, 0).transformDirection(toParent);
+  return { node, position: node.position.clone(), quaternion: node.quaternion.clone(), pivot, axis, angle };
+}
 
 export class StudioScene {
   readonly renderer: THREE.WebGLRenderer;
@@ -170,11 +227,13 @@ export class StudioScene {
   private lastTick = 0;
   private screenImage: HTMLImageElement | null = null;
   private screenVideo: HTMLVideoElement | null = null;
-  private screens = new Map<string, ScreenSlot>();
+  private screens = new Map<"main" | "outer", ScreenSlot>();
   private screen: ScreenSlot | null = null;
   private model: THREE.Group | null = null;
   private normalized: THREE.Group | null = null;
   private mixer: THREE.AnimationMixer | null = null;
+  private folds: ReturnType<typeof foldTable> | null = null;
+  private lid: LidHinge | null = null;
   private settings: Settings;
   private frame = 0;
   private publishFrame = 0;
@@ -485,7 +544,7 @@ export class StudioScene {
     if (JSON.stringify([old.light, old.shadow, old.background, old.screen.island, old.screen.reflection]) !== JSON.stringify([next.light, next.shadow, next.background, next.screen.island, next.screen.reflection])) this.applyEnvironment();
     if (JSON.stringify(old.video) !== JSON.stringify(next.video)) this.applyVideo();
     if (old.device !== next.device || old.finish !== next.finish) void this.loadModel();
-    else if (old.fold !== next.fold) this.applyFold();
+    else if (old.fold !== next.fold || old.lid !== next.lid) this.applyPose();
   }
 
   setInteractionEnabled(enabled: boolean) {
@@ -510,8 +569,8 @@ export class StudioScene {
     this.needsRender = true;
   }
 
-  /** Размер текстуры экрана в пикселях: под него снимаются сайты и фреймы Figma. */
-  /** Активная область экрана в пикселях холста, без чёрной рамки монитора. */
+  /** Активная область экрана в пикселях холста, без чёрной рамки монитора:
+   *  под неё снимаются сайты и фреймы Figma, а у модели без родного разрешения её размер советуется для скриншота. */
   get screenSize() {
     const [insetX, insetY] = this.screen?.inset ?? [0, 0];
     return { width: Math.round(this.screenCanvas.width * (1 - insetX * 2)), height: Math.round(this.screenCanvas.height * (1 - insetY * 2)) };
@@ -695,28 +754,44 @@ export class StudioScene {
       patch.visible = false;
       mesh.add(patch);
     }
-    return { mesh, aspect: frame.width / frame.height, inset: config.inset ?? [0, 0], cutout, patch };
+    return { mesh, aspect: frame.width / frame.height, inset: config.inset ?? [0, 0], width: config.width, cutout, patch };
   }
 
-  /** Ставит шарнир Duo, выбирает активный экран и заново центрирует модель. */
-  private applyFold() {
+  /**
+   * Ставит шарнир Duo или крышку ноутбука, выбирает активный экран и заново
+   * центрирует модель.
+   */
+  private applyPose() {
     const model = deviceModel(this.settings.device);
     if (!this.model || !this.normalized) return;
-    const pose = model.fold?.poses[this.settings.fold];
-    if (this.mixer && pose) this.mixer.setTime(pose.time);
-    this.normalized.rotation.y = THREE.MathUtils.degToRad(pose?.yaw ?? 0);
-    const next = this.screens.get(activeScreen(this.settings.device, this.settings.fold).mesh) ?? null;
+    const fold = model.fold ? this.settings.fold : FOLD_OPEN;
+    if (this.mixer && this.folds) this.mixer.setTime(clipTime(this.folds, FOLD_OPEN - fold));
+    // Клип поворачивает только левую половину. Модель поворачивается на
+    // половину сгиба, чтобы половины стояли к камере симметрично: внутренней
+    // стороной, пока изображение на внутреннем экране, и внешней, когда оно
+    // переходит на внешний экран на обороте левой половины.
+    const yaw = fold < FOLD_OUTER_BELOW ? fold / 2 : -(FOLD_OPEN - fold) / 2;
+    this.normalized.rotation.y = THREE.MathUtils.degToRad(yaw);
+    if (this.lid) {
+      const { node, position, quaternion, pivot, axis, angle } = this.lid;
+      const turn = new THREE.Quaternion().setFromAxisAngle(axis, THREE.MathUtils.degToRad(angle - this.settings.lid));
+      node.position.copy(position).sub(pivot).applyQuaternion(turn).add(pivot);
+      node.quaternion.copy(turn).multiply(quaternion);
+    }
+    const next = this.screens.get(model.fold && fold < FOLD_OUTER_BELOW ? "outer" : "main") ?? null;
+    const changed = next !== this.screen;
     this.screens.forEach((slot) => { slot.mesh.material = slot === next ? this.screenMaterial : this.offMaterial; });
-    if (next && next !== this.screen) {
+    if (next && changed) {
       // Телефон — в родной ширине Pro Max, 1290 px: в неё же снимается сайт по
       // ссылке. Горизонтальный экран ноутбука и монитора — 2796 px в ширину.
-      const width = next.aspect >= 1 ? 2796 : 1290;
+      const width = next.width ?? (next.aspect >= 1 ? 2796 : 1290);
       this.screenCanvas.width = width;
       this.screenCanvas.height = Math.round(width / next.aspect);
       // Размер холста поменялся: старое хранилище текстуры на GPU уже не подходит.
       this.screenTexture.dispose();
     }
     this.screen = next;
+    if (next) this.callbacks.screen(this.screenSize);
     // Центр считается без поворота сцены, иначе крен сдвинет модель.
     const parent = this.model.parent;
     parent?.remove(this.model);
@@ -731,6 +806,10 @@ export class StudioScene {
     this.model.updateMatrixWorld(true);
     this.bounds = new THREE.Box3().setFromObject(this.model);
     parent?.add(this.model);
+    this.needsRender = true;
+    // Крышка двигается ползунком: экран и свет перерисовываются только при
+    // смене экрана, а не на каждый шаг.
+    if (!changed) return;
     this.drawScreen();
     this.applyEnvironment();
   }
@@ -741,7 +820,8 @@ export class StudioScene {
     this.callbacks.model({ status: "loading" });
     try {
       const loader = new GLTFLoader().register((parser) => new SpecularGlossinessPlugin(parser));
-      const gltf = await loader.loadAsync(deviceFinish(model.id, this.settings.finish).path);
+      const finish = deviceFinish(model.id, this.settings.finish);
+      const gltf = await loader.loadAsync(finish.path);
       if (this.disposed || request !== this.modelRequest) { disposeObject(gltf.scene); return; }
       const root = gltf.scene;
       // Текстуры корпуса приходят без анизотропии: под углом и на наезде их
@@ -756,23 +836,33 @@ export class StudioScene {
           }
         }
       });
+      if (finish.recolor) {
+        await recolor(root, finish.recolor.from, finish.recolor.to);
+        if (this.disposed || request !== this.modelRequest) { disposeObject(root); return; }
+      }
+      root.rotation.x += THREE.MathUtils.degToRad(finish.rotateX ?? 0);
       root.rotation.y += model.rotateY;
       root.updateMatrixWorld(true);
       // Телефон вписывается по высоте, монитор — по ширине: иначе широкая
       // модель вылезает за кадр 4:3 в студийном ракурсе. Глубина ограничивает ноутбук: в
       // перспективе передний край клавиатуры иначе подъезжает к камере.
+      // Планшет по высоте как телефон оказывается почти вдвое шире и упирается
+      // в края кадра в студийном ракурсе, поэтому он чуть меньше.
       const size = new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3());
-      const scale = Math.min(2 / size.y, 2.3 / size.x, 1.9 / size.z);
+      const scale = Math.min(2 / size.y, 2.3 / size.x, 1.9 / size.z) * (model.kind === "tablet" ? 0.85 : 1);
       const normalized = new THREE.Group();
       normalized.add(root); normalized.scale.setScalar(scale);
       const replacement = new THREE.Group();
       replacement.add(normalized);
       replacement.updateMatrixWorld(true);
       const reflectionMaterial = new THREE.MeshPhysicalMaterial({ color: 0xffffff, metalness: 0.15, roughness: 0.15, transparent: true, opacity: this.settings.screen.reflection / 100, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
-      const screens = new Map<string, ScreenSlot>();
+      const screens = new Map<"main" | "outer", ScreenSlot>();
+      const configs = finishScreens(model.id, finish.id);
       try {
-        for (const config of model.fold ? [model.screen, model.fold.outer] : [model.screen]) screens.set(config.mesh, this.buildScreen(root, config, reflectionMaterial));
+        screens.set("main", this.buildScreen(root, configs.main, reflectionMaterial));
+        if (configs.outer) screens.set("outer", this.buildScreen(root, configs.outer, reflectionMaterial));
       } catch (error) { disposeObject(replacement); reflectionMaterial.dispose(); throw error; }
+      const lid = model.lid ? lidHinge(root, model.lid) : null;
       let mixer: THREE.AnimationMixer | null = null;
       const clip = model.fold && gltf.animations.find((item) => item.name === model.fold?.clip);
       if (clip) {
@@ -792,12 +882,13 @@ export class StudioScene {
       this.model = replacement;
       this.normalized = normalized;
       this.mixer = mixer;
+      this.folds = clip ? foldTable(clip) : null;
+      this.lid = lid;
       this.screens = screens;
       this.screen = null;
       this.reflectionMaterial = reflectionMaterial;
       this.device.add(replacement);
-      this.applyFold();
-      this.needsRender = true;
+      this.applyPose();
       this.callbacks.model({ status: "ready" });
     } catch (error) {
       if (!this.disposed && request === this.modelRequest) this.callbacks.model({ status: "error", message: error instanceof Error ? error.message : "Не удалось загрузить модель. Попробуйте ещё раз." });

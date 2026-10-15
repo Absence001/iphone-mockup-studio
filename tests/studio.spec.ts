@@ -39,7 +39,12 @@ test("история объединяет жест и сохраняет вет�
   // Проект до появления Duo: без сгиба, цвет чужой модели заменяется доступным.
   const { fold: _fold, ...legacy } = INITIAL_HISTORY.present.settings;
   const old = parseProject(JSON.stringify({ app: "forma", version: 1, settings: { ...legacy, device: "iphone15", finish: "glacier" }, imageData: null }));
-  expect(old.settings.fold).toBe("open"); expect(old.settings.finish).toBe("black");
+  expect(old.settings.fold).toBe(180); expect(old.settings.finish).toBe("black");
+  // Проект с тремя положениями шарнира до ползунка сгиба.
+  expect(parseProject(JSON.stringify({ app: "forma", version: 1, settings: { ...legacy, device: "iphoneDuo", finish: "starWhite", fold: "book" }, imageData: null })).settings.fold).toBe(110);
+  // Проект до появления крышки ноутбука открывается с крышкой как в файле модели.
+  expect(old.settings.lid).toBe(110);
+  expect(() => parseProject(JSON.stringify({ app: "forma", version: 1, settings: { ...legacy, lid: 200 }, imageData: null }))).toThrow();
   // Проект до студийного света: «contrast» становится «studio», тень берётся по умолчанию.
   const { shadow: _shadow, ...unshaded } = INITIAL_HISTORY.present.settings;
   const lit = parseProject(JSON.stringify({ app: "forma", version: 1, settings: { ...unshaded, light: { ...unshaded.light, preset: "contrast" } }, imageData: null }));
@@ -121,6 +126,7 @@ test("навигация как в редакторе, отмена пресет
 test("модели iPhone, ракурсы, изображение, отмена и сохранение проекта", async ({ page }) => {
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await start(page);
+  await expect(page.locator(".screen-size")).toHaveText("1290 × 2796 px");
   await page.locator('input[type="file"]').setInputFiles({ name: "экран.png", mimeType: "image/png", buffer: testImage() });
   await expect(page.getByText("экран.png", { exact: true })).toBeVisible();
   await page.getByLabel("Разрешение", { exact: true }).selectOption("1200");
@@ -128,6 +134,7 @@ test("модели iPhone, ракурсы, изображение, отмена 
   await page.getByRole("tab", { name: "Экран", exact: true }).click();
   await page.getByRole("spinbutton", { name: "Отражения на стекле", exact: true }).fill("0");
   await device(page, "iPhone 18 Pro Max"); await ready(page);
+  await expect(page.locator(".screen-size")).toHaveText("1320 × 2868 px");
   for (const finish of ["Glacier", "Burgundy", "Silver", "Black"]) {
     await choose(page, "Цвет корпуса", finish); await ready(page);
     await expect(page.getByRole("combobox", { name: "Цвет корпуса", exact: true })).toContainText(finish);
@@ -210,7 +217,7 @@ function quadrants(png: ReturnType<typeof decodePNG>) {
   return Object.fromEntries(Object.entries(sums).map(([name, sum]) => [name, { x: sum.x / sum.count, y: sum.y / sum.count, count: sum.count }])) as Record<keyof typeof QUAD, { x: number; y: number; count: number }>;
 }
 
-test("Android, Duo, MacBook и монитор: экран без зеркала, сгиб и проект", async ({ page }) => {
+test("все модели и цвета: экран без зеркала, сгиб Duo, крышка MacBook и проект", async ({ page }) => {
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await start(page);
   await page.locator('input[type="file"]').setInputFiles({ name: "quad.png", mimeType: "image/png", buffer: quadImage() });
@@ -225,32 +232,63 @@ test("Android, Duo, MacBook и монитор: экран без зеркала,
     expect(quad.blue.x, `${label}: синий должен быть слева`).toBeLessThan(quad.yellow.x);
     expect(quad.red.y, `${label}: красный должен быть сверху`).toBeLessThan(quad.blue.y);
   };
-  for (const name of ["Galaxy S26 Ultra", "MacBook Pro 14″", "Pro Display XDR"]) {
+  // Подсказка размера скриншота — родное разрешение устройства.
+  const shotSize: Record<string, string> = {
+    "iPhone 15 Pro": "1179 × 2556 px", "iPhone 15 Pro Max": "1290 × 2796 px", "iPhone 17 Pro": "1206 × 2622 px", "iPhone 17 Pro Max": "1320 × 2868 px", "iPhone 18 Pro": "1206 × 2622 px",
+    "Galaxy S26 Ultra": "1440 × 3120 px", "iPad Pro 13″": "2064 × 2752 px", "MacBook Air 13″": "2560 × 1664 px", "MacBook Pro 14″": "3024 × 1964 px", "iMac 24″": "4480 × 2520 px",
+    "Pro Display XDR": "6016 × 3384 px", "Apple Watch Ultra 2": "410 × 502 px", "Apple Watch Series 9": "396 × 484 px",
+  };
+  // Цвета, выгруженные автором иначе (свои имена узлов экрана, чёрный iPad
+  // лёжа), и цвет, перекрашенный при загрузке.
+  const finishes: Record<string, string[]> = { "iPhone 15 Pro": ["White Titanium"], "iPhone 15 Pro Max": ["White Titanium", "Natural Titanium"], "iPhone 17 Pro Max": ["Deep Blue"], "iPhone 18 Pro": ["Glacier"], "iPad Pro 13″": ["Space Black"] };
+  for (const [name, size] of Object.entries(shotSize)) {
     await device(page, name); await ready(page);
     await expect(page.getByText("quad.png", { exact: true })).toBeVisible();
+    await expect(page.locator(".screen-size")).toHaveText(size);
     await preset(page, "Прямо");
     await check(name);
+    for (const finish of finishes[name] ?? []) {
+      await choose(page, "Цвет корпуса", finish); await ready(page);
+      await check(`${name}, ${finish}`);
+    }
   }
   await expect(page.getByRole("checkbox", { name: "Вырез камеры" })).toHaveCount(0);
+  await expect(page.getByRole("spinbutton", { name: "Раскрытие крышки", exact: true })).toHaveCount(0);
+  // Закрытая крышка прячет экран, раскрытая до упора снова показывает его целиком.
+  await device(page, "MacBook Pro 14″"); await ready(page);
+  const lid = page.getByRole("spinbutton", { name: "Раскрытие крышки", exact: true });
+  await expect(lid).toHaveValue("110");
+  await lid.fill("0"); await lid.press("Enter");
+  const closed = quadrants(decodePNG(await exportPNG(page)));
+  for (const [name, value] of Object.entries(closed)) expect(value.count, `закрытый MacBook: виден цвет ${name}`).toBeLessThan(50);
+  await lid.fill("135"); await lid.press("Enter");
+  await check("MacBook Pro 14″, крышка 135°");
+  await device(page, "Pro Display XDR"); await ready(page);
   await page.getByRole("combobox", { name: "Ракурс", exact: true }).click();
   await expect(page.getByRole("option", { name: "Сзади", exact: true })).toBeVisible();
   await expect(page.getByRole("option", { name: "Горизонтально", exact: true })).toHaveCount(0);
   await page.keyboard.press("Escape"); await expect(page.getByRole("listbox")).toHaveCount(0);
   await device(page, "iPhone Duo"); await ready(page);
   await expect(page.getByRole("checkbox", { name: "Вырез камеры" })).toHaveCount(0);
-  for (const fold of ["Раскрыт", "Книжкой", "Сложен"]) {
-    await page.getByRole("button", { name: fold, exact: true }).click(); await ready(page);
-    await check(`iPhone Duo, ${fold}`);
+  const fold = page.getByRole("spinbutton", { name: "Раскрытие телефона", exact: true });
+  await expect(fold).toHaveValue("180");
+  for (const angle of ["180", "110", "0"]) {
+    // Правки ползунка в пределах 600 мс история объединяет в один шаг.
+    await page.waitForTimeout(700);
+    await fold.fill(angle); await fold.press("Enter"); await ready(page);
+    await check(`iPhone Duo, ${angle}°`);
   }
+  // У вымышленного Duo нет родного разрешения: размер измеряется по экрану модели.
+  await expect(page.locator(".screen-size")).toHaveText("1290 × 1865 px");
   // У сложенного Duo изображение на внешнем экране с вырезом камеры.
   await expect(page.getByRole("checkbox", { name: "Вырез камеры" })).toBeVisible();
   const saved = page.waitForEvent("download");
   await page.getByRole("button", { name: "Сохранить проект (Ctrl+S)", exact: true }).click();
   const project = await saved, path = await project.path(); if (!path) throw new Error("Нет файла проекта");
   const parsed = parseProject(await readFile(path, "utf8"));
-  expect(parsed.settings.device).toBe("iphoneDuo"); expect(parsed.settings.fold).toBe("closed"); expect(parsed.settings.finish).toBe("starWhite");
+  expect(parsed.settings.device).toBe("iphoneDuo"); expect(parsed.settings.fold).toBe(0); expect(parsed.settings.finish).toBe("starWhite");
   await page.keyboard.press("Control+z");
-  await expect(page.getByRole("button", { name: "Книжкой", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(fold).toHaveValue("110");
   expect(errors).toEqual([]);
 });
 
