@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { ArrowDownToLine, ArrowRight, Camera, Check, ChevronDown, CircleHelp, ImagePlus, Layers2, Link2, Redo2, RotateCcw, Save, SlidersHorizontal, Sun, Undo2, Upload, X } from "lucide-react";
+import { ArrowDownToLine, ArrowRight, Camera, Check, ChevronDown, CircleHelp, Film, Image as ImageIcon, ImagePlus, Layers2, Link2, Pause, Play, Redo2, RotateCcw, Save, SlidersHorizontal, Sun, Undo2, Upload, X } from "lucide-react";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { Button } from "./ui/button";
 import { PagePicker } from "./page-picker";
@@ -10,13 +10,14 @@ import { FluidChoice } from "./fluid-choice";
 import { ThemeToggle } from "./theme-toggle";
 import { Control, Segmented } from "./control";
 import { Viewport, type ModelState, type NavigationCommand } from "./viewport";
-import { DEFAULT_CAMERA, DEFAULT_SETTINGS, PRESETS, clamp, exportSize, type Aspect, type CameraSettings, type Device, type Fold, type ScreenFit, type Settings } from "@/lib/settings";
+import { DEFAULT_CAMERA, DEFAULT_SETTINGS, PRESETS, clamp, exportSize, videoEnd, videoLength, type Aspect, type CameraSettings, type Device, type Fold, type ScreenFit, type ScreenKind, type Settings } from "@/lib/settings";
+import { BACKGROUNDS, backgroundCss, backgroundPreset } from "@/lib/backgrounds";
 import { DEVICES, activeScreen, deviceFinish, deviceModel } from "@/lib/models";
-import { INITIAL_DOCUMENT, INITIAL_HISTORY, historyReducer, type DocumentState } from "@/lib/history";
+import { EMPTY_ASSET, INITIAL_DOCUMENT, INITIAL_HISTORY, historyReducer, type DocumentState } from "@/lib/history";
 import { parseProject, projectDocument, serializeProject } from "@/lib/project";
 import { captureLink, isFigmaClipboard, isFigmaLink, normalizeLink, previewLink, type PagePreview } from "@/lib/capture";
 import { spring } from "@/lib/springs";
-import type { StudioScene } from "@/lib/scene";
+import { canExportVideo, type StudioScene } from "@/lib/scene";
 
 /**
  * Снимок близкой к экрану пропорции заполняет экран целиком, всё остальное
@@ -37,6 +38,34 @@ function withScreen(current: DocumentState, device: Device, fold: Fold): Documen
 
 const FOLD_OPTIONS: { id: Fold; label: string }[] = [{ id: "open", label: "Раскрыт" }, { id: "book", label: "Книжкой" }, { id: "closed", label: "Сложен" }];
 
+const IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp"];
+const VIDEO_TYPES = ["video/mp4", "video/webm", "video/quicktime"];
+
+/** Читает размеры и длительность видео, не выводя его на страницу. */
+function probeVideo(url: string): Promise<{ width: number; height: number; duration: number }> {
+  return new Promise((resolve, reject) => {
+    const video = document.createElement("video");
+    video.preload = "metadata";
+    video.muted = true;
+    video.onloadedmetadata = () => resolve({ width: video.videoWidth, height: video.videoHeight, duration: Number.isFinite(video.duration) ? video.duration : 0 });
+    video.onerror = () => reject(new Error("Не удалось прочитать видео. Выберите MP4, WebM или MOV."));
+    video.src = url;
+  });
+}
+
+/** Секунды в виде 0:07,4 — длительности здесь короткие. */
+function timecode(seconds: number): string {
+  const whole = Math.max(0, seconds);
+  const minutes = Math.floor(whole / 60);
+  return `${minutes}:${(whole - minutes * 60).toFixed(1).padStart(4, "0")}`;
+}
+
+/** Вложение фона из открытого проекта, если оно там было. */
+function projectBackdrop(project: ReturnType<typeof parseProject>): DocumentState["backdrop"] | null {
+  if (!project.backdropData) return null;
+  return { url: project.backdropData, name: project.backdropName, width: 0, height: 0, demo: false, kind: project.backdropKind, duration: 0 };
+}
+
 function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a"); link.href = url; link.download = name;
@@ -53,9 +82,10 @@ function ColorField({ label, value, onChange }: { label: string; value: string; 
 
 export function Studio() {
   const [history, dispatch] = useReducer(historyReducer, INITIAL_HISTORY);
-  const { settings, image } = history.present;
+  const { settings, image, backdrop } = history.present;
   const sceneRef = useRef<StudioScene | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const backdropRef = useRef<HTMLInputElement>(null);
   const helpRef = useRef<HTMLDialogElement>(null);
   const uploadRequest = useRef(0);
   const objectURLs = useRef(new Set<string>());
@@ -63,6 +93,11 @@ export function Studio() {
   const [tab, setTab] = useState<"camera" | "screen" | "scene">("camera");
   const [modelState, setModelState] = useState<ModelState>({ status: "loading" });
   const [busy, setBusy] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [format, setFormat] = useState<"png" | "webm">("png");
+  const [fps, setFps] = useState(30);
+  const [progress, setProgress] = useState(0);
+  const [videoExportReady, setVideoExportReady] = useState(false);
   const [loadingImage, setLoadingImage] = useState(false);
   const [capturing, setCapturing] = useState<"site" | "figma" | null>(null);
   const [linkDraft, setLinkDraft] = useState("");
@@ -73,6 +108,7 @@ export function Studio() {
   const title = "Мокап";
   const [activePreset, setActivePreset] = useState("front");
   const size = exportSize(settings.aspect, settings.resolution);
+  const movieReady = image.kind === "video" && image.duration > 0 && videoExportReady;
   const model = deviceModel(settings.device);
   const distanceUnit = model.unit;
   const presets = PRESETS.filter((preset) => !preset.phoneOnly || model.kind === "phone" || model.kind === "foldable");
@@ -84,6 +120,14 @@ export function Studio() {
     toastTimer.current = setTimeout(() => setToast(null), error ? 6000 : 3500);
   }, []);
   const showError = useCallback((text: string) => showToast(text, true), [showToast]);
+  const onVideo = useCallback((value: boolean) => setPlaying(value), []);
+  const toggleVideo = useCallback(() => {
+    const scene = sceneRef.current;
+    if (!scene?.hasVideo) return;
+    if (scene.videoPlaying) scene.pauseVideo(); else void scene.playVideo();
+  }, []);
+  // MediaRecorder и captureStream есть не везде, а на сервере их нет вовсе.
+  useEffect(() => { setVideoExportReady(canExportVideo()); }, []);
   const mutate = useCallback((recipe: (current: DocumentState) => DocumentState, group?: string) => dispatch({ type: "change", recipe, group, time: Date.now() }), []);
   const change = useCallback(<K extends keyof Settings,>(key: K, value: Settings[K], group?: string) => mutate((current) => ({ ...current, settings: { ...current.settings, [key]: value } }), group), [mutate]);
   const camera = useCallback((patch: Partial<CameraSettings>, group?: string) => {
@@ -95,36 +139,73 @@ export function Studio() {
   const navigate = useCallback((type: NavigationCommand["type"]) => setNavigation({ type, id: Date.now() + Math.random() }), []);
 
   useEffect(() => () => { objectURLs.current.forEach((url) => URL.revokeObjectURL(url)); if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
+  useEffect(() => { if (image.kind !== "video") { setFormat("png"); setPlaying(false); } }, [image.kind]);
 
   const openFile = useCallback(async (file: File, options?: { name?: string; toast?: (width: number, height: number) => string }) => {
     const request = ++uploadRequest.current;
     setCapturing(null);
-    if (file.size > 32 * 1024 * 1024) { showError("Файл больше 32 МБ. Выберите изображение или проект меньшего размера."); return; }
+    if (file.size > 32 * 1024 * 1024) { showError("Файл больше 32 МБ. Выберите файл меньшего размера."); return; }
     setLoadingImage(true);
     let url: string | null = null;
     let decodedSize: { width: number; height: number } | null = null;
     try {
       let project: ReturnType<typeof parseProject> | null = null;
       if (file.name.toLowerCase().endsWith(".json")) project = parseProject(await file.text());
-      else if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) throw new Error("Выберите PNG, JPG, WebP или проект .forma.json.");
+      else if (![...IMAGE_TYPES, ...VIDEO_TYPES].includes(file.type)) throw new Error("Выберите PNG, JPG, WebP, MP4, WebM или проект .forma.json.");
       if (project && project.imageData === null) {
-        if (request === uploadRequest.current) mutate(() => projectDocument(project.settings, null));
+        if (request === uploadRequest.current) mutate(() => projectDocument(project.settings, null, projectBackdrop(project)));
       } else {
         url = project?.imageData ?? URL.createObjectURL(file);
-        const decoded = new Image(); decoded.src = url;
-        try { await decoded.decode(); } catch { throw new Error("Не удалось прочитать изображение. Выберите другой PNG, JPG или WebP."); }
-        if (decoded.naturalWidth > 20000 || decoded.naturalHeight > 20000) throw new Error("Изображение слишком большое. Уменьшите его до 20 000 пикселей по стороне.");
+        const kind: ScreenKind = project ? project.imageKind : VIDEO_TYPES.includes(file.type) ? "video" : "image";
+        let duration = 0;
+        if (kind === "video") {
+          const probed = await probeVideo(url);
+          if (!probed.width || !probed.height) throw new Error("В файле нет видеодорожки. Выберите MP4 или WebM.");
+          decodedSize = { width: probed.width, height: probed.height };
+          duration = probed.duration;
+        } else {
+          const decoded = new Image(); decoded.src = url;
+          try { await decoded.decode(); } catch { throw new Error("Не удалось прочитать изображение. Выберите другой PNG, JPG или WebP."); }
+          if (decoded.naturalWidth > 20000 || decoded.naturalHeight > 20000) throw new Error("Изображение слишком большое. Уменьшите его до 20 000 пикселей по стороне.");
+          decodedSize = { width: decoded.naturalWidth, height: decoded.naturalHeight };
+        }
         if (request !== uploadRequest.current) { if (url.startsWith("blob:")) URL.revokeObjectURL(url); return; }
         if (url.startsWith("blob:")) objectURLs.current.add(url);
-        decodedSize = { width: decoded.naturalWidth, height: decoded.naturalHeight };
-        const nextImage = { url, name: project?.imageName ?? options?.name ?? file.name, width: decoded.naturalWidth, height: decoded.naturalHeight, demo: false };
-        mutate((current) => project ? projectDocument(project.settings, nextImage) : { ...current, image: nextImage, settings: { ...current.settings, screen: { ...current.settings.screen, fit: fitForImage(nextImage.width, nextImage.height, activeScreen(current.settings.device, current.settings.fold).aspect), scale: 100, x: 0, y: 0 } } });
+        const size = decodedSize;
+        const nextImage = { url, name: project?.imageName ?? options?.name ?? file.name, width: size.width, height: size.height, demo: false, kind, duration };
+        mutate((current) => project ? projectDocument(project.settings, nextImage, projectBackdrop(project)) : {
+          ...current, image: nextImage,
+          settings: {
+            ...current.settings,
+            screen: { ...current.settings.screen, fit: fitForImage(size.width, size.height, activeScreen(current.settings.device, current.settings.fold).aspect), scale: 100, x: 0, y: 0 },
+            // Новый файл — новая обрезка: прежние секунды к нему не относятся.
+            video: { ...current.settings.video, start: 0, end: 0 },
+          },
+        });
       }
-      if (request === uploadRequest.current) showToast(project ? "Проект открыт" : options?.toast && decodedSize ? options.toast(decodedSize.width, decodedSize.height) : "Изображение на экране обновлено");
+      if (request === uploadRequest.current) showToast(project ? "Проект открыт" : options?.toast && decodedSize ? options.toast(decodedSize.width, decodedSize.height) : "Экран обновлён");
     } catch (error) {
       if (url?.startsWith("blob:")) URL.revokeObjectURL(url);
       if (request === uploadRequest.current) showError(error instanceof Error ? error.message : "Не удалось открыть файл.");
     } finally { if (request === uploadRequest.current) setLoadingImage(false); }
+  }, [mutate, showError, showToast]);
+
+  /**
+   * Своё фото или видео позади устройства. Файл не попадает в слот экрана:
+   * это отдельное вложение документа со своей отменой и сохранением.
+   */
+  const openBackdrop = useCallback(async (file: File) => {
+    if (file.size > 48 * 1024 * 1024) { showError("Файл фона больше 48 МБ. Выберите файл меньшего размера."); return; }
+    if (![...IMAGE_TYPES, ...VIDEO_TYPES].includes(file.type)) { showError("Для фона выберите PNG, JPG, WebP, MP4 или WebM."); return; }
+    const url = URL.createObjectURL(file);
+    objectURLs.current.add(url);
+    const kind: ScreenKind = VIDEO_TYPES.includes(file.type) ? "video" : "image";
+    mutate((current) => ({
+      ...current,
+      backdrop: { url, name: file.name, width: 0, height: 0, demo: false, kind, duration: 0 },
+      settings: { ...current.settings, background: { ...current.settings.background, mode: "custom" } },
+    }));
+    showToast(kind === "video" ? "Видеофон обновлён" : "Фон обновлён");
   }, [mutate, showError, showToast]);
 
   /** Снимает сайт или фрейм Figma в размер текстуры экрана текущей модели. */
@@ -177,6 +258,19 @@ export function Studio() {
     } catch (error) { showError(error instanceof Error ? error.message : "Не удалось сохранить PNG. Попробуйте меньшее разрешение."); }
     finally { setBusy(false); }
   }, [busy, modelState.status, loadingImage, size.width, size.height, title, showToast, showError]);
+
+  const exportMovie = useCallback(async () => {
+    const scene = sceneRef.current;
+    if (!scene || busy || modelState.status !== "ready" || loadingImage || !scene.hasVideo) return;
+    setBusy(true); setProgress(0);
+    try {
+      const blob = await scene.exportVideo(size.width, size.height, fps, setProgress);
+      const filename = title.trim().replace(/[<>:"/\\|?*\x00-\x1f]/g, "-") || "mockup";
+      download(blob, `${filename}-${size.width}x${size.height}.webm`);
+      showToast(`Ролик сохранён · ${size.width} × ${size.height}`);
+    } catch (error) { showError(error instanceof Error ? error.message : "Не удалось записать ролик. Попробуйте меньшее разрешение."); }
+    finally { setBusy(false); setProgress(0); }
+  }, [busy, modelState.status, loadingImage, size.width, size.height, fps, title, showToast, showError]);
 
   const saveProject = useCallback(async () => {
     try {
@@ -242,11 +336,12 @@ export function Studio() {
   const screen = (patch: Partial<Settings["screen"]>, group?: string) => change("screen", { ...settings.screen, ...patch }, group);
   const light = (patch: Partial<Settings["light"]>, group?: string) => change("light", { ...settings.light, ...patch }, group);
   const background = (patch: Partial<Settings["background"]>, group?: string) => change("background", { ...settings.background, ...patch }, group);
+  const video = (patch: Partial<Settings["video"]>, group?: string) => change("video", { ...settings.video, ...patch }, group);
 
   return <MotionConfig reducedMotion="user"><main className="studio-shell">
     <div className="editor-layout">
       <section className="stage-column" aria-label="Сцена">
-        <Viewport settings={settings} image={image} sceneRef={sceneRef} onCamera={onCamera} onModel={setModelState} onError={showError} modelState={modelState} navigation={navigation} onResetCamera={resetCamera} onDropFile={(file) => void openFile(file)} busy={busy}
+        <Viewport settings={settings} image={image} backdrop={backdrop} sceneRef={sceneRef} onCamera={onCamera} onModel={setModelState} onError={showError} onVideo={onVideo} modelState={modelState} navigation={navigation} onResetCamera={resetCamera} onDropFile={(file) => void openFile(file)} busy={busy}
           topLeft={<FluidChoice label="Ракурс" value={activePreset} placeholder="Свой ракурс" icon={Camera} className="preset-choice" disabled={busy} items={presets.map((preset) => ({ id: preset.id, label: preset.name }))} onChange={(id) => { const preset = presets.find((item) => item.id === id); if (preset) { change("camera", { ...preset.camera }); setActivePreset(id); } }} />}
           topRight={<div className="header-actions"><Button variant="ghost" size="icon-compact" aria-label="Отменить (Ctrl+Z)" title="Отменить · Ctrl+Z" disabled={!history.past.length || busy} onClick={() => { dispatch({ type: "undo" }); setActivePreset(""); }}><Undo2 /></Button><Button variant="ghost" size="icon-compact" aria-label="Повторить (Ctrl+Shift+Z)" title="Повторить · Ctrl+Shift+Z" disabled={!history.future.length || busy} onClick={() => dispatch({ type: "redo" })}><Redo2 /></Button><span className="toolbar-divider" /><Button variant="ghost" size="icon-compact" aria-label="Сохранить проект (Ctrl+S)" title="Сохранить проект · Ctrl+S" onClick={() => void saveProject()}><Save /></Button><ThemeToggle /><Button variant="ghost" size="icon-compact" aria-label="Горячие клавиши" title="Горячие клавиши · ?" onClick={() => helpRef.current?.showModal()}><CircleHelp /></Button></div>} />
       </section>
@@ -258,11 +353,11 @@ export function Studio() {
             <div className="property-row"><span>Цвет</span><FluidChoice label="Цвет корпуса" value={settings.finish} items={model.finishes.map((item) => ({ id: item.id, label: item.name, color: item.color }))} className="finish-trigger" onChange={(id) => { const selected = model.finishes.find((item) => item.id === id); if (selected) change("finish", selected.id); }} /></div>
             {model.fold && <div className="property-row"><span>Сгиб</span><Segmented className="segmented fold-options" label="Положение шарнира" value={settings.fold} items={FOLD_OPTIONS} onChange={(fold) => mutate((current) => withScreen(current, current.settings.device, fold))} /></div>}
             <div className="section-heading screen-heading"><h2>Экран</h2>{!image.demo && <button className="quiet-icon" aria-label="Убрать изображение" title="Вернуть демо-экран" onClick={() => mutate((current) => ({ ...current, image: INITIAL_DOCUMENT.image }))}><X size={13} /></button>}</div>
-            <button className={`upload-card${image.demo ? " demo-upload" : ""}`} disabled={loadingImage} onClick={() => fileRef.current?.click()} aria-label="Загрузить изображение на экран" title="Загрузить изображение или открыть проект · Ctrl+O">
-              {image.demo ? <span className="upload-icon"><ImagePlus size={20} /></span> : <span className="upload-thumb"><img src={image.url} alt="Загруженное изображение" /></span>}
-              <span className="upload-copy"><strong>{capturing === "site" ? "Снимаем сайт…" : capturing === "figma" ? "Загружаем фрейм из Figma…" : loadingImage ? "Загружаем…" : image.demo ? "Загрузить изображение" : image.name}</strong><span>{capturing ? "Обычно несколько секунд" : image.demo ? "PNG, JPG, WebP или вставьте · Ctrl+V" : `${image.width} × ${image.height}`}</span></span><Upload size={14} />
+            <button className={`upload-card${image.demo ? " demo-upload" : ""}`} disabled={loadingImage} onClick={() => fileRef.current?.click()} aria-label="Загрузить изображение или видео на экран" title="Загрузить изображение, видео или открыть проект · Ctrl+O">
+              {image.demo ? <span className="upload-icon"><ImagePlus size={20} /></span> : image.kind === "video" ? <span className="upload-icon"><Film size={20} /></span> : <span className="upload-thumb"><img src={image.url} alt="Загруженное изображение" /></span>}
+              <span className="upload-copy"><strong>{capturing === "site" ? "Снимаем сайт…" : capturing === "figma" ? "Загружаем фрейм из Figma…" : loadingImage ? "Загружаем…" : image.demo ? "Загрузить изображение" : image.name}</strong><span>{capturing ? "Обычно несколько секунд" : image.demo ? "PNG, JPG, WebP, MP4 или вставьте · Ctrl+V" : image.kind === "video" ? `${image.width} × ${image.height} · ${timecode(image.duration)}` : `${image.width} × ${image.height}`}</span></span><Upload size={14} />
             </button>
-            <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,.json" className="sr-only" tabIndex={-1} aria-label="Файл изображения или проекта" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void openFile(file); }} />
+            <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,video/quicktime,.json" className="sr-only" tabIndex={-1} aria-label="Файл изображения, видео или проекта" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void openFile(file); }} />
             <form className="link-field" onSubmit={(event) => { event.preventDefault(); void openLink(linkDraft); }}>
               <Link2 size={14} aria-hidden="true" />
               <input type="text" inputMode="url" value={linkDraft} onChange={(event) => setLinkDraft(event.target.value)} placeholder="Ссылка на сайт или фрейм Figma" aria-label="Ссылка на сайт или фрейм Figma" title="Снимок встанет в разрешении экрана телефона" spellCheck={false} autoComplete="off" disabled={loadingImage} />
@@ -282,14 +377,43 @@ export function Studio() {
               <section className="control-section"><div className="section-heading"><h3>Ракурс</h3></div><Control label="Поворот" value={settings.camera.azimuth} min={-180} max={180} unit="°" onChange={(azimuth) => camera({ azimuth }, "azimuth")} /><Control label="Наклон" value={settings.camera.elevation} min={-89} max={89} unit="°" onChange={(elevation) => camera({ elevation }, "elevation")} /><Control label="Крен" value={settings.camera.roll} min={-180} max={180} unit="°" onChange={(roll) => camera({ roll }, "roll")} /></section>
               <section className="control-section"><div className="section-heading"><h3>Положение в кадре</h3></div><Control label="По горизонтали" value={settings.camera.offsetX} min={-100} max={100} unit="%" onChange={(offsetX) => camera({ offsetX }, "cameraX")} /><Control label="По вертикали" value={settings.camera.offsetY} min={-100} max={100} unit="%" onChange={(offsetY) => camera({ offsetY }, "cameraY")} /></section>
             </>}
-            {tab === "screen" && <><section className="control-section"><div className="section-heading"><h3>Размещение изображения</h3></div><Segmented label="Размещение изображения" value={settings.screen.fit} items={[{ id: "cover", label: "Заполнить" }, { id: "contain", label: "Вписать" }]} onChange={(fit) => screen({ fit })} /><Control label="Масштаб изображения" value={settings.screen.scale} min={25} max={300} unit="%" onChange={(scale) => screen({ scale }, "screenScale")} /><Control label="Сдвиг по горизонтали" value={settings.screen.x} min={-100} max={100} unit="%" onChange={(x) => screen({ x }, "screenX")} /><Control label="Сдвиг по вертикали" value={settings.screen.y} min={-100} max={100} unit="%" onChange={(y) => screen({ y }, "screenY")} /></section><section className="control-section"><div className="section-heading"><h3>Детали экрана</h3></div>{hasCutout && <label className="switch-row"><span><strong>Вырез камеры</strong><span>Выключите, если он уже на скриншоте</span></span><input type="checkbox" checked={settings.screen.island} onChange={(event) => screen({ island: event.target.checked })} /><i aria-hidden="true" /></label>}<Control label="Отражения на стекле" value={settings.screen.reflection} min={0} max={50} unit="%" onChange={(reflection) => screen({ reflection }, "reflection")} /></section><button className="text-button" onClick={() => change("screen", { ...DEFAULT_SETTINGS.screen })}><RotateCcw size={13} /> Сбросить настройки экрана</button></>}
-            {tab === "scene" && <><section className="control-section"><div className="section-heading"><h3>Фон</h3></div><Segmented label="Тип фона" value={settings.background.mode} items={[{ id: "solid", label: "Цвет" }, { id: "gradient", label: "Градиент" }, { id: "transparent", label: "Прозрачный" }]} onChange={(mode) => background({ mode })} />
-              {settings.background.mode === "transparent" ? <div className="transparency-note"><span className="checkerboard" /><span>Прозрачный фон</span></div> : <><div className="background-swatches">{["#ffffff", "#f4f4f4", "#e5e5e5", "#a3a3a3", "#737373", "#262626"].map((color) => <button key={color} style={{ background: color }} aria-label={`Фон ${color}`} aria-pressed={settings.background.color === color} onClick={() => background({ color })}>{settings.background.color === color && <Check size={13} style={{ color: color === "#262626" ? "white" : "#292929" }} />}</button>)}</div><ColorField label="Основной цвет" value={settings.background.color} onChange={(color) => background({ color }, "backgroundColor")} />{settings.background.mode === "gradient" && <><ColorField label="Второй цвет" value={settings.background.secondary} onChange={(secondary) => background({ secondary }, "backgroundSecondary")} /><Control label="Направление градиента" value={settings.background.angle} min={0} max={360} unit="°" onChange={(angle) => background({ angle }, "gradientAngle")} /></>}</>}
+            {tab === "screen" && <><section className="control-section"><div className="section-heading"><h3>Размещение изображения</h3></div><Segmented label="Размещение изображения" value={settings.screen.fit} items={[{ id: "cover", label: "Заполнить" }, { id: "contain", label: "Вписать" }]} onChange={(fit) => screen({ fit })} /><Control label="Масштаб изображения" value={settings.screen.scale} min={25} max={300} unit="%" onChange={(scale) => screen({ scale }, "screenScale")} /><Control label="Сдвиг по горизонтали" value={settings.screen.x} min={-100} max={100} unit="%" onChange={(x) => screen({ x }, "screenX")} /><Control label="Сдвиг по вертикали" value={settings.screen.y} min={-100} max={100} unit="%" onChange={(y) => screen({ y }, "screenY")} /></section><section className="control-section"><div className="section-heading"><h3>Детали экрана</h3></div>{hasCutout && <label className="switch-row"><span><strong>Вырез камеры</strong><span>Выключите, если он уже на скриншоте</span></span><input type="checkbox" checked={settings.screen.island} onChange={(event) => screen({ island: event.target.checked })} /><i aria-hidden="true" /></label>}<Control label="Отражения на стекле" value={settings.screen.reflection} min={0} max={50} unit="%" onChange={(reflection) => screen({ reflection }, "reflection")} /></section>{image.kind === "video" && <section className="control-section"><div className="section-heading"><h3>Видео</h3><span className="format-badge">{timecode(videoLength(settings.video, image.duration))}</span></div>
+              <div className="video-transport">
+                <button type="button" className="icon-button" onClick={toggleVideo} aria-label={playing ? "Пауза" : "Воспроизвести"} title={playing ? "Пауза" : "Воспроизвести"}>{playing ? <Pause size={16} /> : <Play size={16} />}</button>
+                <span className="video-range">{timecode(settings.video.start)} — {timecode(videoEnd(settings.video.end, image.duration))}</span>
+              </div>
+              <label className="switch-row"><span><strong>Зациклить</strong><span>Отрезок повторяется без паузы</span></span><input type="checkbox" checked={settings.video.loop} onChange={(event) => video({ loop: event.target.checked })} /><i aria-hidden="true" /></label>
+              <label className="switch-row"><span><strong>Звук</strong><span>В ролик экспорта звук не попадает</span></span><input type="checkbox" checked={!settings.video.muted} onChange={(event) => video({ muted: !event.target.checked })} /><i aria-hidden="true" /></label>
+              <Control label="Начало" value={settings.video.start} min={0} max={Math.max(0.1, image.duration - 0.1)} step={0.1} unit="с" onChange={(start) => video({ start: Math.min(start, videoEnd(settings.video.end, image.duration) - 0.1) }, "videoStart")} />
+              <Control label="Конец" value={videoEnd(settings.video.end, image.duration)} min={0.1} max={image.duration} step={0.1} unit="с" onChange={(end) => video({ end: Math.max(end, settings.video.start + 0.1) }, "videoEnd")} />
+              <Control label="Скорость" value={settings.video.speed} min={25} max={400} unit="%" onChange={(speed) => video({ speed }, "videoSpeed")} />
+            </section>}<button className="text-button" onClick={() => change("screen", { ...DEFAULT_SETTINGS.screen })}><RotateCcw size={13} /> Сбросить настройки экрана</button></>}
+            {tab === "scene" && <><section className="control-section"><div className="section-heading"><h3>Фон</h3></div><Segmented label="Тип фона" value={settings.background.mode} items={[{ id: "solid", label: "Цвет" }, { id: "gradient", label: "Градиент" }, { id: "preset", label: "Готовые" }, { id: "transparent", label: "Без фона" }]} onChange={(mode) => background({ mode })} />
+              {settings.background.mode === "preset" ? <><div className="background-gallery" role="group" aria-label="Готовые фоны">{BACKGROUNDS.map((preset) => <button key={preset.id} type="button" style={{ background: backgroundCss(preset) }} aria-label={`${preset.group} · ${preset.name}`} title={`${preset.group} · ${preset.name}`} aria-pressed={settings.background.preset === preset.id} onClick={() => background({ preset: preset.id })}>{settings.background.preset === preset.id && <Check size={14} />}</button>)}</div>
+                <p className="light-description">{backgroundPreset(settings.background.preset).group} · {backgroundPreset(settings.background.preset).name}</p>
+                <label className="switch-row"><span><strong>Движение</strong><span>Пятна медленно ходят по кругу</span></span><input type="checkbox" checked={settings.background.animated} onChange={(event) => background({ animated: event.target.checked })} /><i aria-hidden="true" /></label>
+                {settings.background.animated && <Control label="Скорость движения" value={settings.background.speed} min={10} max={300} unit="%" onChange={(speed) => background({ speed }, "backgroundSpeed")} />}</>
+              : settings.background.mode === "custom" ? null
+              : settings.background.mode === "transparent" ? <div className="transparency-note"><span className="checkerboard" /><span>Прозрачный фон</span></div> : <><div className="background-swatches">{["#ffffff", "#f4f4f4", "#e5e5e5", "#a3a3a3", "#737373", "#262626"].map((color) => <button key={color} style={{ background: color }} aria-label={`Фон ${color}`} aria-pressed={settings.background.color === color} onClick={() => background({ color })}>{settings.background.color === color && <Check size={13} style={{ color: color === "#262626" ? "white" : "#292929" }} />}</button>)}</div><ColorField label="Основной цвет" value={settings.background.color} onChange={(color) => background({ color }, "backgroundColor")} />{settings.background.mode === "gradient" && <><ColorField label="Второй цвет" value={settings.background.secondary} onChange={(secondary) => background({ secondary }, "backgroundSecondary")} /><Control label="Направление градиента" value={settings.background.angle} min={0} max={360} unit="°" onChange={(angle) => background({ angle }, "gradientAngle")} /></>}</>}
+              {/* Своё фото или видео лежит отдельным блоком и видно при любом
+                  типе фона: загрузка сама переключает режим на «Свой», так что
+                  искать его в переключателе не нужно. */}
+              <div className="backdrop-slot">
+                <button type="button" className={`upload-card${backdrop.demo ? " demo-upload" : ""}`} onClick={() => backdropRef.current?.click()} aria-label="Загрузить свой фон" title="Фото или видео позади устройства">
+                    <span className="upload-icon">{backdrop.demo ? <ImagePlus size={20} /> : backdrop.kind === "video" ? <Film size={20} /> : <ImageIcon size={20} />}</span>
+                    <span className="upload-copy"><strong>{backdrop.demo ? "Загрузить свой фон" : backdrop.name}</strong><span>{backdrop.demo ? "PNG, JPG, WebP, MP4 или WebM" : backdrop.kind === "video" ? "Видео · зациклено и без звука" : "Изображение по заполнению"}</span></span><Upload size={14} />
+                  </button>
+                  <input ref={backdropRef} type="file" accept="image/png,image/jpeg,image/webp,video/mp4,video/webm,video/quicktime" className="sr-only" tabIndex={-1} aria-label="Файл фона" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void openBackdrop(file); }} />
+                  {/* Файл уже загружен, но показан другой тип фона — вернуть его
+                      одной кнопкой, не возвращаясь к переключателю. */}
+                  {!backdrop.demo && settings.background.mode !== "custom" && <button className="text-button" onClick={() => background({ mode: "custom" })}><ImageIcon size={13} /> Показать свой фон</button>}
+                  {!backdrop.demo && settings.background.mode === "custom" && <button className="text-button" onClick={() => mutate((current) => ({ ...current, backdrop: EMPTY_ASSET, settings: { ...current.settings, background: { ...current.settings.background, mode: "solid" } } }))}><X size={13} /> Убрать свой фон</button>}
+              </div>
               </section><section className="control-section"><div className="section-heading"><h3>Свет</h3></div><Segmented label="Схема освещения" value={settings.light.preset} items={[{ id: "soft", label: "Мягкий" }, { id: "contrast", label: "Контрастный" }, { id: "rim", label: "По краям" }]} onChange={(preset) => light({ preset })} /><p className="light-description">{settings.light.preset === "soft" ? "Ровный свет без резких бликов." : settings.light.preset === "contrast" ? "Подчёркивает грани и материал корпуса." : "Подсвечивает края на тёмном фоне."}</p><Control label="Яркость" value={settings.light.intensity} min={0} max={200} unit="%" onChange={(intensity) => light({ intensity }, "lightIntensity")} /><details className="light-advanced"><summary>Дополнительно</summary><Control label="Направление света" value={settings.light.rotation} min={-180} max={180} unit="°" onChange={(rotation) => light({ rotation }, "lightRotation")} /><Control label="Экспозиция" value={settings.light.exposure} min={25} max={200} unit="%" onChange={(exposure) => light({ exposure }, "exposure")} /></details></section></>}
             </div>
           </div>
         </fieldset>
-        <div className="export-panel"><div className="section-heading"><h2>Экспорт</h2><span className="format-badge">PNG</span></div><Segmented className="aspect-options" label="Формат кадра" value={settings.aspect} disabled={busy} items={(["16:9", "4:3", "1:1", "4:5", "9:16"] as Aspect[]).map((aspect) => ({ id: aspect, label: aspect }))} onChange={(aspect) => change("aspect", aspect)} /><div className="resolution-row"><label htmlFor="resolution">Разрешение</label><div className="select-wrap"><select id="resolution" value={settings.resolution} disabled={busy} onChange={(event) => change("resolution", Number(event.target.value))}><option value={1200}>1200 px</option><option value={1920}>1920 px</option><option value={2400}>2400 px</option><option value={3840}>4K · 3840 px</option></select><ChevronDown size={12} /></div></div><button className="export-button" disabled={busy || loadingImage || modelState.status !== "ready"} onClick={() => void exportPNG()}>{busy ? <span className="spinner" /> : <ArrowDownToLine size={16} />}<span>{busy ? "Сохраняем PNG…" : "Скачать мокап"}</span><span className="export-shortcut">↗</span></button><div className="export-caption"><span>{size.width} × {size.height}{settings.background.mode === "transparent" ? " · Прозрачный фон" : " · PNG"}</span><span title="Экспорт · Ctrl+Shift+E">Ctrl ⇧ E</span></div></div>
+        <div className="export-panel"><div className="section-heading"><h2>Экспорт</h2><span className="format-badge">{format === "webm" ? "WebM" : "PNG"}</span></div>{movieReady && <Segmented className="segmented export-format" label="Что сохранять" value={format} disabled={busy} items={[{ id: "png" as const, label: "Кадр" }, { id: "webm" as const, label: "Ролик" }]} onChange={setFormat} />}<Segmented className="aspect-options" label="Формат кадра" value={settings.aspect} disabled={busy} items={(["16:9", "4:3", "1:1", "4:5", "9:16"] as Aspect[]).map((aspect) => ({ id: aspect, label: aspect }))} onChange={(aspect) => change("aspect", aspect)} /><div className="resolution-row"><label htmlFor="resolution">Разрешение</label><div className="select-wrap"><select id="resolution" value={settings.resolution} disabled={busy} onChange={(event) => change("resolution", Number(event.target.value))}><option value={1200}>1200 px</option><option value={1920}>1920 px</option><option value={2400}>2400 px</option><option value={3840}>4K · 3840 px</option></select><ChevronDown size={12} /></div></div>{format === "webm" && <div className="resolution-row"><label htmlFor="fps">Кадров в секунду</label><div className="select-wrap"><select id="fps" value={fps} disabled={busy} onChange={(event) => setFps(Number(event.target.value))}><option value={24}>24</option><option value={30}>30</option><option value={60}>60</option></select><ChevronDown size={12} /></div></div>}<button className="export-button" disabled={busy || loadingImage || modelState.status !== "ready"} onClick={() => void (format === "webm" ? exportMovie() : exportPNG())}>{busy ? <span className="spinner" /> : format === "webm" ? <Film size={16} /> : <ArrowDownToLine size={16} />}<span>{busy ? (format === "webm" ? `Пишем ролик… ${Math.round(progress * 100)} %` : "Сохраняем PNG…") : format === "webm" ? "Скачать ролик" : "Скачать мокап"}</span><span className="export-shortcut">↗</span></button><div className="export-caption"><span>{size.width} × {size.height}{format === "webm" ? ` · WebM · ${timecode(videoLength(settings.video, image.duration))}` : settings.background.mode === "transparent" ? " · Прозрачный фон" : " · PNG"}</span><span title="Экспорт · Ctrl+Shift+E">Ctrl ⇧ E</span></div></div>
       </aside>
     </div>
 

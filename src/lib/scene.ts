@@ -4,10 +4,37 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { activeScreen, deviceFinish, deviceModel, type ScreenConfig } from "./models";
 import { SpecularGlossinessPlugin } from "./spec-gloss";
-import { clamp, type CameraSettings, type Settings } from "./settings";
+import { clamp, videoEnd, type CameraSettings, type Settings } from "./settings";
+import { backgroundPreset, paintBackground } from "./backgrounds";
 
 type LoadState = { status: "loading" | "ready" | "error"; message?: string };
-type Callbacks = { camera: (camera: CameraSettings) => void; model: (state: LoadState) => void };
+type Callbacks = {
+  camera: (camera: CameraSettings) => void;
+  model: (state: LoadState) => void;
+  /** Видео на экране пошло или встало: кнопка в панели идёт за сценой. */
+  video?: (playing: boolean) => void;
+};
+
+/** Ждёт, пока видео реально встанет на запрошенную секунду. */
+function seek(video: HTMLVideoElement, time: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (Math.abs(video.currentTime - time) < 0.01) { resolve(); return; }
+    const done = () => { video.removeEventListener("seeked", done); resolve(); };
+    video.addEventListener("seeked", done);
+    video.currentTime = time;
+  });
+}
+
+/** Кодеки по убыванию качества; берём первый, который умеет браузер. */
+function recorderMime(): string | null {
+  if (typeof MediaRecorder === "undefined") return null;
+  return ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"].find((type) => MediaRecorder.isTypeSupported(type)) ?? null;
+}
+
+/** Умеет ли браузер записывать экспорт в видео. */
+export function canExportVideo(): boolean {
+  return recorderMime() !== null && typeof HTMLCanvasElement.prototype.captureStream === "function";
+}
 
 function disposeObject(object: THREE.Object3D) {
   const materials = new Set<THREE.Material>();
@@ -116,7 +143,21 @@ export class StudioScene {
   private readonly offMaterial = new THREE.MeshBasicMaterial({ color: 0x080909, toneMapped: false });
   private reflectionMaterial: THREE.MeshPhysicalMaterial | null = null;
   private backgroundTexture: THREE.CanvasTexture | null = null;
+  /** Холст пресетного фона переиспользуется: он перерисовывается каждый кадр. */
+  private readonly presetCanvas = document.createElement("canvas");
+  private presetTexture: THREE.CanvasTexture | null = null;
+  private backgroundAnimated = false;
+  /** Системная настройка «уменьшить анимацию»: при ней фон не движется. */
+  private readonly calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  /** Своё фото или видео позади устройства. */
+  private backdropTexture: THREE.Texture | null = null;
+  private backdropVideo: HTMLVideoElement | null = null;
+  private backdropAspect = 1;
+  private backdropRequest = 0;
+  private backgroundSeconds = 0;
+  private lastTick = 0;
   private screenImage: HTMLImageElement | null = null;
+  private screenVideo: HTMLVideoElement | null = null;
   private screens = new Map<string, ScreenSlot>();
   private screen: ScreenSlot | null = null;
   private model: THREE.Group | null = null;
@@ -158,6 +199,8 @@ export class StudioScene {
     this.rim.position.set(-2, 2, -4);
     this.lightRig.add(this.key, this.fill, this.rim);
     this.scene.add(this.lightRig, this.ambient);
+    this.presetCanvas.width = 512;
+    this.presetCanvas.height = 512;
     this.screenCanvas.width = 1290;
     this.screenCanvas.height = 2796;
     this.screenTexture = new THREE.CanvasTexture(this.screenCanvas);
@@ -216,11 +259,112 @@ export class StudioScene {
     this.frame = requestAnimationFrame(this.tick);
     if (this.exporting) return;
     this.controls.update();
+    this.advance();
     if (this.needsRender || this.interacting) {
       this.renderer.render(this.scene, this.camera);
       this.needsRender = false;
     }
   };
+
+  /**
+   * Движение между кадрами: орбиты пятен фона и текущий кадр видео. Шаг
+   * считается от реального времени и ограничен сверху, иначе после паузы во
+   * вкладке фон прыгнул бы вперёд на всю паузу.
+   */
+  private advance() {
+    const now = performance.now();
+    const elapsed = this.lastTick ? Math.min((now - this.lastTick) / 1000, 0.1) : 0;
+    this.lastTick = now;
+    if (this.backgroundAnimated) {
+      this.backgroundSeconds += elapsed * (this.settings.background.speed / 100);
+      this.paintPreset();
+      this.needsRender = true;
+    }
+    if (this.backdropVideo && !this.backdropVideo.paused) this.needsRender = true;
+    const video = this.screenVideo;
+    if (!video || video.paused || video.ended) return;
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const end = videoEnd(this.settings.video.end, duration);
+    const start = clamp(this.settings.video.start, 0, Math.max(0, duration - 0.05));
+    // Зацикливание делаем сами, а не флагом loop: отрезок может быть обрезан.
+    if (video.currentTime >= end - 0.02) {
+      if (this.settings.video.loop) video.currentTime = start;
+      else { video.pause(); this.callbacks.video?.(false); }
+    }
+    this.drawScreen();
+  }
+
+  /**
+   * Своё фото или видео кладётся на фон «по заполнению»: текстура не тянется,
+   * а обрезается через repeat и offset. Пересчитывается на каждом изменении
+   * пропорций кадра, включая экспорт в другом размере.
+   */
+  private fitBackdrop(viewAspect: number) {
+    const texture = this.backdropTexture;
+    if (!texture || !this.backdropAspect) return;
+    if (viewAspect > this.backdropAspect) {
+      const part = this.backdropAspect / viewAspect;
+      texture.repeat.set(1, part);
+      texture.offset.set(0, (1 - part) / 2);
+    } else {
+      const part = viewAspect / this.backdropAspect;
+      texture.repeat.set(part, 1);
+      texture.offset.set((1 - part) / 2, 0);
+    }
+    this.needsRender = true;
+  }
+
+  /** Ставит своё фото или видео на фон. Пустая ссылка снимает его. */
+  async setBackdrop(url: string, kind: "image" | "video") {
+    const request = ++this.backdropRequest;
+    if (!url) { this.releaseBackdrop(); this.applyEnvironment(); return; }
+    if (kind === "video") {
+      const video = document.createElement("video");
+      video.src = url; video.muted = true; video.loop = true; video.playsInline = true; video.preload = "auto";
+      await new Promise<void>((resolve, reject) => {
+        video.onloadeddata = () => resolve();
+        video.onerror = () => reject(new Error("Не удалось прочитать видео фона."));
+      });
+      if (request !== this.backdropRequest || this.disposed) { video.removeAttribute("src"); video.load(); return; }
+      this.releaseBackdrop();
+      const texture = new THREE.VideoTexture(video);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      this.backdropTexture = texture;
+      this.backdropVideo = video;
+      this.backdropAspect = video.videoWidth / Math.max(1, video.videoHeight);
+      await video.play().catch(() => undefined);
+    } else {
+      const image = new Image();
+      image.src = url;
+      await image.decode();
+      if (request !== this.backdropRequest || this.disposed) return;
+      this.releaseBackdrop();
+      const texture = new THREE.Texture(image);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.needsUpdate = true;
+      this.backdropTexture = texture;
+      this.backdropAspect = image.naturalWidth / Math.max(1, image.naturalHeight);
+    }
+    this.applyEnvironment();
+  }
+
+  private releaseBackdrop() {
+    this.backdropTexture?.dispose();
+    this.backdropTexture = null;
+    const video = this.backdropVideo;
+    this.backdropVideo = null;
+    if (!video) return;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  }
+
+  private paintPreset() {
+    const context = this.presetCanvas.getContext("2d");
+    if (!context) return;
+    paintBackground(context, backgroundPreset(this.settings.background.preset), this.presetCanvas.width, this.backgroundSeconds);
+    if (this.presetTexture) this.presetTexture.needsUpdate = true;
+  }
 
   private resize() {
     if (this.disposed || this.exporting) return;
@@ -228,10 +372,12 @@ export class StudioScene {
     this.height = Math.max(1, Math.round(this.host.clientHeight));
     this.renderer.setSize(this.width, this.height, false);
     this.updateProjection(this.width, this.height);
+    this.fitBackdrop(this.width / Math.max(1, this.height));
     this.needsRender = true;
   }
 
   private updateProjection(width: number, height: number) {
+    this.fitBackdrop(width / Math.max(1, height));
     const ratio = width / height;
     this.perspective.aspect = ratio;
     this.perspective.setFocalLength(this.settings.camera.focalLength);
@@ -280,9 +426,23 @@ export class StudioScene {
     this.renderer.toneMappingExposure = light.exposure / 100;
     this.backgroundTexture?.dispose();
     this.backgroundTexture = null;
-    if (background.mode === "transparent") this.scene.background = null;
+    this.backgroundAnimated = background.mode === "preset" && background.animated && !this.calm;
+    if (background.mode === "custom") {
+      // Пока своё фото или видео не загружено, показываем ровный цвет, иначе
+      // сцена осталась бы с прошлым фоном и выбор выглядел бы сломанным.
+      if (this.backdropTexture) { this.scene.background = this.backdropTexture; this.fitBackdrop(this.width / Math.max(1, this.height)); }
+      else this.scene.background = new THREE.Color(background.color);
+    }
+    else if (background.mode === "transparent") this.scene.background = null;
     else if (background.mode === "solid") this.scene.background = new THREE.Color(background.color);
-    else {
+    else if (background.mode === "preset") {
+      if (!this.presetTexture) {
+        this.presetTexture = new THREE.CanvasTexture(this.presetCanvas);
+        this.presetTexture.colorSpace = THREE.SRGBColorSpace;
+      }
+      this.paintPreset();
+      this.scene.background = this.presetTexture;
+    } else {
       const canvas = document.createElement("canvas");
       canvas.width = 512; canvas.height = 512;
       const context = canvas.getContext("2d");
@@ -313,6 +473,7 @@ export class StudioScene {
     if (JSON.stringify(old.camera) !== JSON.stringify(next.camera)) this.applyCamera();
     if (JSON.stringify(old.screen) !== JSON.stringify(next.screen)) this.drawScreen();
     if (JSON.stringify([old.light, old.background, old.screen.island, old.screen.reflection]) !== JSON.stringify([next.light, next.background, next.screen.island, next.screen.reflection])) this.applyEnvironment();
+    if (JSON.stringify(old.video) !== JSON.stringify(next.video)) this.applyVideo();
     if (old.device !== next.device || old.finish !== next.finish) void this.loadModel();
     else if (old.fold !== next.fold) this.applyFold();
   }
@@ -350,6 +511,7 @@ export class StudioScene {
   clearImage() {
     this.imageRequest++;
     this.screenImage = null;
+    this.releaseVideo();
     this.drawScreen();
   }
 
@@ -359,8 +521,91 @@ export class StudioScene {
     image.src = url;
     await image.decode();
     if (request !== this.imageRequest || this.disposed) return;
+    this.releaseVideo();
     this.screenImage = image;
     this.drawScreen();
+  }
+
+  /**
+   * Ставит видео на экран. Кадры попадают туда же, куда и картинка — в
+   * холст экрана, — поэтому вписывание, масштаб, сдвиг и заплатка выреза
+   * работают без изменений.
+   */
+  async setVideo(url: string) {
+    const request = ++this.imageRequest;
+    const video = document.createElement("video");
+    video.src = url;
+    video.muted = this.settings.video.muted;
+    video.playsInline = true;
+    video.preload = "auto";
+    video.loop = false;
+    await new Promise<void>((resolve, reject) => {
+      video.onloadeddata = () => resolve();
+      video.onerror = () => reject(new Error("Не удалось прочитать видео. Выберите MP4 или WebM."));
+    });
+    if (request !== this.imageRequest || this.disposed) { video.removeAttribute("src"); video.load(); return; }
+    this.releaseVideo();
+    this.screenImage = null;
+    this.screenVideo = video;
+    video.playbackRate = clamp(this.settings.video.speed / 100, 0.25, 4);
+    await seek(video, clamp(this.settings.video.start, 0, video.duration || 0));
+    // Автозапуск со звуком браузер заблокирует; беззвучное видео пойдёт сразу.
+    await video.play().catch(() => undefined);
+    this.callbacks.video?.(!video.paused);
+    this.drawScreen();
+  }
+
+  private releaseVideo() {
+    const video = this.screenVideo;
+    this.screenVideo = null;
+    if (!video) return;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  }
+
+  /** Что сейчас выводится на экран: кадр видео имеет приоритет над картинкой. */
+  private get screenSource(): { element: CanvasImageSource; width: number; height: number } | null {
+    const video = this.screenVideo;
+    if (video && video.videoWidth) return { element: video, width: video.videoWidth, height: video.videoHeight };
+    const image = this.screenImage;
+    if (image) return { element: image, width: image.naturalWidth, height: image.naturalHeight };
+    return null;
+  }
+
+  get hasVideo() { return this.screenVideo !== null; }
+  get videoPlaying() { return this.screenVideo !== null && !this.screenVideo.paused; }
+  get videoTime() { return this.screenVideo?.currentTime ?? 0; }
+
+  async playVideo() {
+    const video = this.screenVideo;
+    if (!video) return;
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const end = videoEnd(this.settings.video.end, duration);
+    const start = clamp(this.settings.video.start, 0, Math.max(0, duration - 0.05));
+    if (video.currentTime >= end - 0.02) await seek(video, start);
+    await video.play().catch(() => undefined);
+    this.callbacks.video?.(!video.paused);
+  }
+
+  pauseVideo() {
+    this.screenVideo?.pause();
+    this.callbacks.video?.(false);
+  }
+
+  /** Применяет обрезку, скорость и звук к уже загруженному видео. */
+  private applyVideo() {
+    const video = this.screenVideo;
+    if (!video) return;
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    video.muted = this.settings.video.muted;
+    video.playbackRate = clamp(this.settings.video.speed / 100, 0.25, 4);
+    const start = clamp(this.settings.video.start, 0, Math.max(0, duration - 0.05));
+    const end = videoEnd(this.settings.video.end, duration);
+    if (video.currentTime < start - 0.05 || video.currentTime > end + 0.05) {
+      video.currentTime = start;
+      this.drawScreen();
+    }
   }
 
   private drawScreen() {
@@ -370,16 +615,16 @@ export class StudioScene {
     const [insetX, insetY] = this.screen?.inset ?? [0, 0];
     const left = this.screenCanvas.width * insetX, top = this.screenCanvas.height * insetY;
     const width = this.screenCanvas.width - left * 2, height = this.screenCanvas.height - top * 2;
-    const image = this.screenImage;
+    const source = this.screenSource;
     context.fillStyle = "#080909";
     context.fillRect(0, 0, this.screenCanvas.width, this.screenCanvas.height);
-    if (image) {
-      const ratio = (fit === "cover" ? Math.max(width / image.naturalWidth, height / image.naturalHeight) : Math.min(width / image.naturalWidth, height / image.naturalHeight)) * scale / 100;
-      const drawWidth = image.naturalWidth * ratio, drawHeight = image.naturalHeight * ratio;
+    if (source) {
+      const ratio = (fit === "cover" ? Math.max(width / source.width, height / source.height) : Math.min(width / source.width, height / source.height)) * scale / 100;
+      const drawWidth = source.width * ratio, drawHeight = source.height * ratio;
       // Рамка монитора остаётся чёрной: изображение обрезается по активной области.
       context.save();
       context.beginPath(); context.rect(left, top, width, height); context.clip();
-      context.drawImage(image, left + (width - drawWidth) / 2 + x / 100 * width, top + (height - drawHeight) / 2 + y / 100 * height, drawWidth, drawHeight);
+      context.drawImage(source.element, left + (width - drawWidth) / 2 + x / 100 * width, top + (height - drawHeight) / 2 + y / 100 * height, drawWidth, drawHeight);
       context.restore();
     }
     this.screenTexture.needsUpdate = true;
@@ -569,6 +814,75 @@ export class StudioScene {
     }
   }
 
+  /**
+   * Записывает ролик с экрана в WebM. Запись идёт в реальном времени через
+   * MediaRecorder: отрезок на пять секунд пишется пять секунд. Кадры снимаются
+   * с того же холста, что и PNG, поэтому картинка в ролике и в снимке
+   * совпадает. Звук исходного видео в ролик не попадает.
+   */
+  async exportVideo(width: number, height: number, fps: number, onProgress?: (value: number) => void): Promise<Blob> {
+    const video = this.screenVideo;
+    if (!video) throw new Error("Сначала загрузите видео на экран.");
+    if (this.exporting || this.disposed) throw new Error("Дождитесь завершения экспорта.");
+    const mimeType = recorderMime();
+    if (!mimeType || typeof this.renderer.domElement.captureStream !== "function") throw new Error("Браузер не умеет записывать видео. Попробуйте Chrome, Edge или Firefox.");
+    if (Math.max(width, height) > this.renderer.capabilities.maxTextureSize) throw new Error("Видеокарта не поддерживает это разрешение. Выберите меньший размер.");
+    this.exporting = true;
+    this.controls.enabled = false;
+    const ratio = this.renderer.getPixelRatio();
+    const wasPlaying = !video.paused;
+    const seconds = this.backgroundSeconds;
+    try {
+      this.renderer.setPixelRatio(1);
+      this.renderer.setSize(width, height, false);
+      this.updateProjection(width, height);
+      const duration = Number.isFinite(video.duration) ? video.duration : 0;
+      const start = clamp(this.settings.video.start, 0, Math.max(0, duration - 0.05));
+      const end = videoEnd(this.settings.video.end, duration);
+      video.pause();
+      video.playbackRate = clamp(this.settings.video.speed / 100, 0.25, 4);
+      await seek(video, start);
+      this.drawScreen();
+      this.renderer.render(this.scene, this.camera);
+      const stream = this.renderer.domElement.captureStream(fps);
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: Math.round(width * height * fps * 0.14) });
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+      const stopped = new Promise<void>((resolve) => { recorder.onstop = () => resolve(); });
+      recorder.start();
+      await video.play();
+      await new Promise<void>((resolve) => {
+        const step = () => {
+          if (this.disposed) { resolve(); return; }
+          this.drawScreen();
+          if (this.backgroundAnimated) {
+            this.backgroundSeconds += (1 / fps) * (this.settings.background.speed / 100);
+            this.paintPreset();
+          }
+          this.renderer.render(this.scene, this.camera);
+          onProgress?.(clamp((video.currentTime - start) / Math.max(0.001, end - start), 0, 1));
+          if (video.ended || video.currentTime >= end - 0.02) { resolve(); return; }
+          requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      });
+      video.pause();
+      recorder.stop();
+      await stopped;
+      stream.getTracks().forEach((track) => track.stop());
+      if (!chunks.length) throw new Error("Запись не получилась. Попробуйте меньшее разрешение или частоту кадров.");
+      return new Blob(chunks, { type: mimeType });
+    } finally {
+      this.backgroundSeconds = seconds;
+      this.renderer.setPixelRatio(ratio);
+      this.exporting = false;
+      this.controls.enabled = true;
+      this.resize();
+      if (wasPlaying) void video.play().catch(() => undefined);
+      this.callbacks.video?.(!video.paused);
+    }
+  }
+
   dispose() {
     this.disposed = true;
     this.modelRequest++; this.imageRequest++;
@@ -578,7 +892,8 @@ export class StudioScene {
     this.renderer.domElement.removeEventListener("webglcontextlost", this.handleContextLost);
     if (this.model) disposeObject(this.model);
     this.screenMaterial.dispose(); this.offMaterial.dispose(); this.screenTexture.dispose();
-    this.backgroundTexture?.dispose(); this.environment.dispose();
+    this.releaseVideo(); this.releaseBackdrop();
+    this.backgroundTexture?.dispose(); this.presetTexture?.dispose(); this.environment.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }

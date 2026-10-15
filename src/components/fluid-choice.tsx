@@ -1,6 +1,7 @@
 "use client";
 
-import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger } from "./ui/select";
+import { Fragment } from "react";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger } from "./ui/select";
 import type { IconComponent } from "@/lib/icon-context";
 
 export interface ChoiceItem { id: string; label: string; color?: string; group?: string }
@@ -19,7 +20,12 @@ export function FluidChoice({ label, value, items, onChange, disabled, placehold
     <SelectTrigger aria-label={label} placeholder={placeholder} icon={icon} className={className} />
     <SelectContent className="choice-content">
       {groups.length > 1 || groups[0] !== undefined
-        ? groups.map((group) => <SelectGroup key={group} aria-label={group}><SelectLabel>{group}</SelectLabel>{items.filter((item) => item.group === group).map(row)}</SelectGroup>)
+        ? groups.map((group, index) => <Fragment key={group}>
+            {/* Линия между группами: без неё подписи теряются и непонятно,
+                где кончается iPhone и начинается Android. */}
+            {index > 0 && <SelectSeparator />}
+            <SelectGroup aria-label={group}><SelectLabel>{group}</SelectLabel>{items.filter((item) => item.group === group).map(row)}</SelectGroup>
+          </Fragment>)
         : items.map(row)}
     </SelectContent>
   </Select>;
