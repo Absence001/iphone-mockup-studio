@@ -113,7 +113,8 @@ svg { flex-shrink: 0; }
 .property-row > span { width: 41px; flex-shrink: 0; color: var(--fg-muted); font-size: var(--fs-caption); }
 .property-row > div { min-width: 0; flex: 1; }
 .device-choice, .finish-trigger { width: 100%; min-width: 0 !important; background: var(--panel-raised); border: 1px solid transparent; }
-.fold-options { margin-block-end: 0; }
+.hinge-control { margin-block-start: 10px; }
+.hinge-control > p { margin-block-start: 6px; color: var(--fg-muted); font-size: var(--fs-micro); }
 /* По верху строки: на базовой линии образец вылезает выше обрезанной по высоте букв строки и срезается сверху. */
 .finish-choice { display: inline-flex; align-items: center; gap: var(--space-sm); font-size: var(--fs-body-compact); vertical-align: top; }
 .finish-choice > span { display: inline-block; height: 15px; width: 22px; border-radius: 4px; box-shadow: inset 0 0 0 1px var(--ring-inset); flex-shrink: 0; }
