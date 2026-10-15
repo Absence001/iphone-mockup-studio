@@ -221,7 +221,7 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
       <button className={!hand ? "active" : ""} aria-label="Вращение (V)" aria-pressed={!hand} title="Вращение · V" onClick={() => setHand(false)}><MousePointer2 size={18} /></button>
       <button className={hand ? "active" : ""} aria-label="Рука (H)" aria-pressed={hand} title="Перемещение · H / Space" onClick={() => setHand(true)}><Hand size={18} /></button>
     </FluidStrip>
-    <div className="artboard" data-testid="artboard" data-view-zoom={view.zoom.toFixed(3)} data-view-x={view.x.toFixed(1)} data-view-y={view.y.toFixed(1)}
+    <div className="artboard" data-clarity-mask="true" data-testid="artboard" data-view-zoom={view.zoom.toFixed(3)} data-view-x={view.x.toFixed(1)} data-view-y={view.y.toFixed(1)}
       style={{ width, height, transform: `translate(-50%, -50%) translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}>
       <div className={`render-surface${settings.background.mode === "transparent" ? " checkerboard" : ""}`} ref={canvasRef} />
       {modelState.status !== "ready" && <div className="scene-status" role="status">

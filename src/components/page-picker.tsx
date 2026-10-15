@@ -34,7 +34,7 @@ export function PagePicker({ preview, onCancel, onConfirm }: { preview: PagePrev
   const maxScroll = Math.max(0, pageHeight - preview.viewport.height);
   const position = Math.min(scrollY, maxScroll);
 
-  return <dialog ref={dialogRef} className="help-dialog page-picker" aria-labelledby="page-picker-title" onCancel={(event) => { event.preventDefault(); onCancel(); }}
+  return <dialog ref={dialogRef} className="help-dialog page-picker" data-clarity-mask="true" aria-labelledby="page-picker-title" onCancel={(event) => { event.preventDefault(); onCancel(); }}
     onKeyDown={(event) => { if (event.key === "Enter" && !(event.target instanceof HTMLButtonElement)) { event.preventDefault(); onConfirm(position); } }}>
     <div className="dialog-heading"><span className="dialog-icon"><Camera size={22} /></span><button className="icon-button" aria-label="Закрыть" onClick={onCancel}><X size={18} /></button></div>
     <h2 id="page-picker-title">Какой экран снять?</h2>

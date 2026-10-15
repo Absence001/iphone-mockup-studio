@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Script from "next/script";
+import { ClarityAnalytics } from "@/components/clarity-analytics";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -18,6 +19,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
     <body>
       <Script id="mockup-theme" strategy="beforeInteractive">{themeScript}</Script>
       {children}
+      <ClarityAnalytics enabled={process.env.VERCEL_ENV === "production"} />
     </body>
   </html>;
 }

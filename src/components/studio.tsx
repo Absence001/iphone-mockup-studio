@@ -18,6 +18,7 @@ import { parseProject, projectDocument, serializeProject } from "@/lib/project";
 import { captureLink, isFigmaClipboard, isFigmaLink, normalizeLink, previewLink, type PagePreview } from "@/lib/capture";
 import { spring } from "@/lib/springs";
 import { canExportVideo, type StudioScene } from "@/lib/scene";
+import { trackAnalyticsEvent } from "@/lib/analytics";
 
 /**
  * Снимок близкой к экрану пропорции заполняет экран целиком, всё остальное
@@ -259,6 +260,7 @@ export function Studio() {
       const blob = await sceneRef.current.exportPNG(size.width, size.height);
       const filename = title.trim().replace(/[<>:"/\\|?*\x00-\x1f]/g, "-") || "mockup";
       download(blob, `${filename}-${size.width}x${size.height}.png`);
+      trackAnalyticsEvent("mockup_export_png");
       showToast(`PNG сохранён · ${size.width} × ${size.height}`);
     } catch (error) { showError(error instanceof Error ? error.message : "Не удалось сохранить PNG. Попробуйте меньшее разрешение."); }
     finally { setBusy(false); }
@@ -272,6 +274,7 @@ export function Studio() {
       const blob = await scene.exportVideo(size.width, size.height, fps, setProgress);
       const filename = title.trim().replace(/[<>:"/\\|?*\x00-\x1f]/g, "-") || "mockup";
       download(blob, `${filename}-${size.width}x${size.height}.webm`);
+      trackAnalyticsEvent("mockup_export_video");
       showToast(`Ролик сохранён · ${size.width} × ${size.height}`);
     } catch (error) { showError(error instanceof Error ? error.message : "Не удалось записать ролик. Попробуйте меньшее разрешение."); }
     finally { setBusy(false); setProgress(0); }
@@ -353,7 +356,7 @@ export function Studio() {
 
       <aside className="inspector" aria-label="Настройки мокапа">
         <fieldset className="inspector-fields" disabled={busy}>
-          <div className="asset-settings">
+          <div className="asset-settings" data-clarity-mask="true">
             <div className="property-row"><span>Модель</span><FluidChoice label="Модель устройства" value={settings.device} items={DEVICES.map((item) => ({ id: item.id, label: item.name, group: item.group }))} className="device-choice" onChange={(id) => { const selected = DEVICES.find((item) => item.id === id); if (selected) mutate((current) => withScreen(current, selected.id, current.settings.fold)); }} /></div>
             <div className="property-row"><span>Цвет</span><FluidChoice label="Цвет корпуса" value={settings.finish} items={model.finishes.map((item) => ({ id: item.id, label: item.name, color: item.color }))} className="finish-trigger" onChange={(id) => { const selected = model.finishes.find((item) => item.id === id); if (selected) change("finish", selected.id); }} /></div>
             {model.fold && <div className="hinge-control"><Control label="Раскрытие телефона" value={settings.fold} min={0} max={FOLD_OPEN} unit="°" onChange={(fold) => mutate((current) => withScreen(current, current.settings.device, fold), "fold")} /><p>{settings.fold < FOLD_OUTER_BELOW ? "Изображение на внешнем экране" : `На внутреннем экране · ниже ${FOLD_OUTER_BELOW}° — на внешнем`}</p></div>}
@@ -404,7 +407,7 @@ export function Studio() {
               {/* Своё фото или видео лежит отдельным блоком и видно при любом
                   типе фона: загрузка сама переключает режим на «Свой», так что
                   искать его в переключателе не нужно. */}
-              <div className="backdrop-slot">
+              <div className="backdrop-slot" data-clarity-mask="true">
                 <button type="button" className={`upload-card${backdrop.demo ? " demo-upload" : ""}`} onClick={() => backdropRef.current?.click()} aria-label="Загрузить свой фон" title="Фото или видео позади устройства">
                     <span className="upload-icon">{backdrop.demo ? <ImagePlus size={20} /> : backdrop.kind === "video" ? <Film size={20} /> : <ImageIcon size={20} />}</span>
                     <span className="upload-copy"><strong>{backdrop.demo ? "Загрузить свой фон" : backdrop.name}</strong><span>{backdrop.demo ? "PNG, JPG, WebP, MP4 или WebM" : backdrop.kind === "video" ? "Видео · зациклено и без звука" : "Изображение по заполнению"}</span></span><Upload size={14} />
