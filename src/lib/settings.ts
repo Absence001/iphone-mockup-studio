@@ -1,6 +1,6 @@
 export type Projection = "perspective" | "orthographic";
 export type BackgroundMode = "solid" | "gradient" | "preset" | "custom" | "transparent";
-export type Lighting = "soft" | "contrast" | "rim";
+export type Lighting = "soft" | "studio" | "rim";
 export type ScreenFit = "cover" | "contain";
 export type Aspect = "16:9" | "4:3" | "1:1" | "4:5" | "9:16";
 export type Device = "iphone15" | "iphone18" | "iphoneDuo" | "galaxyS26Ultra" | "macbookPro14" | "proDisplayXdr";
@@ -46,6 +46,8 @@ export interface Settings {
   /** Воспроизведение видео на экране; к изображениям не применяется. */
   video: { loop: boolean; speed: number; start: number; end: number; muted: boolean };
   light: { preset: Lighting; intensity: number; exposure: number; rotation: number };
+  /** Тень на фоне позади устройства; величины в процентах. */
+  shadow: { enabled: boolean; opacity: number; softness: number; distance: number };
   aspect: Aspect;
   resolution: number;
 }
@@ -78,6 +80,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // после загрузки.
   video: { loop: true, speed: 100, start: 0, end: 0, muted: true },
   light: { preset: "soft", intensity: 100, exposure: 100, rotation: 0 },
+  shadow: { enabled: true, opacity: 35, softness: 50, distance: 30 },
   aspect: "4:3", resolution: 2400,
 };
 
