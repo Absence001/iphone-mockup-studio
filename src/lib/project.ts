@@ -1,5 +1,6 @@
 import { INITIAL_DOCUMENT, type DocumentState } from "./history";
-import { type Settings } from "./settings";
+import { deviceFinish } from "./models";
+import { DEVICE_IDS, FINISH_IDS, FOLDS, type Settings } from "./settings";
 
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Не удалось открыть проект: неверный формат файла.");
@@ -31,7 +32,9 @@ export function parseProject(text: string): { settings: Settings; imageData: str
   const s = record(data.settings), c = record(s.camera), screen = record(s.screen), bg = record(s.background), light = record(s.light);
   if (typeof screen.island !== "boolean") throw new Error("В проекте неверная настройка выреза камеры.");
   const settings: Settings = {
-    device: option(s.device, ["iphone15", "iphone18"]), finish: option(s.finish, ["black", "glacier", "burgundy", "silver"]),
+    device: option(s.device, DEVICE_IDS), finish: option(s.finish, FINISH_IDS),
+    // Проекты до появления Duo сохранялись без положения шарнира.
+    fold: s.fold === undefined ? "open" : option(s.fold, FOLDS),
     aspect: option(s.aspect, ["16:9", "4:3", "1:1", "4:5", "9:16"]), resolution: number(s, "resolution", 256, 3840),
     camera: {
       projection: option(c.projection, ["perspective", "orthographic"]), azimuth: number(c, "azimuth", -360, 360), elevation: number(c, "elevation", -89, 89),
@@ -41,7 +44,7 @@ export function parseProject(text: string): { settings: Settings; imageData: str
     background: { mode: option(bg.mode, ["solid", "gradient", "transparent"]), color: color(bg.color), secondary: color(bg.secondary), angle: number(bg, "angle", 0, 360) },
     light: { preset: option(light.preset, ["soft", "contrast", "rim"]), intensity: number(light, "intensity", 0, 200), exposure: number(light, "exposure", 25, 200), rotation: number(light, "rotation", -180, 180) },
   };
-  if (settings.device === "iphone15") settings.finish = "black";
+  settings.finish = deviceFinish(settings.device, settings.finish).id;
   const imageData = data.imageData;
   if (imageData !== null && (typeof imageData !== "string" || !/^data:image\/(png|jpeg|webp);base64,/i.test(imageData))) throw new Error("В проекте неподдерживаемое изображение.");
   return { settings, imageData, imageName: typeof data.imageName === "string" ? data.imageName.slice(0, 255) : "Экран из проекта" };

@@ -17,11 +17,14 @@ export function isFigmaLink(link: string) {
   try { return /(^|\.)figma\.com$/i.test(new URL(link).hostname); } catch { return false; }
 }
 
-/** Снимок сайта или фрейма Figma ровно в размер экрана телефона. */
-export async function captureLink(link: string, width: number, height: number): Promise<File> {
+/**
+ * Снимок сайта или фрейма Figma ровно в размер экрана модели. Для ноутбука
+ * и монитора сайт открывается в настольной вёрстке.
+ */
+export async function captureLink(link: string, width: number, height: number, desktop = false): Promise<File> {
   let response: Response;
   try {
-    response = await fetch("/api/capture", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: link, width, height }) });
+    response = await fetch("/api/capture", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: link, width, height, desktop }) });
   } catch { throw new Error("Нет связи с сервером. Проверьте подключение и попробуйте ещё раз."); }
   if (!response.ok) {
     const data: unknown = await response.json().catch(() => null);
