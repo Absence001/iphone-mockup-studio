@@ -2,7 +2,8 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
-import { modelConfig } from "./models";
+import { activeScreen, deviceFinish, deviceModel, type ScreenConfig } from "./models";
+import { SpecularGlossinessPlugin } from "./spec-gloss";
 import { clamp, type CameraSettings, type Settings } from "./settings";
 
 type LoadState = { status: "loading" | "ready" | "error"; message?: string };
@@ -38,20 +39,60 @@ function roundedShape(width: number, height: number, radius: number) {
   return shape;
 }
 
-function mapScreenUV(mesh: THREE.Mesh, bounds: THREE.Box3) {
-  mesh.updateWorldMatrix(true, false);
-  mesh.geometry = mesh.geometry.clone();
+/**
+ * Плоскость экрана в локальных координатах меша. Экран не всегда смотрит
+ * вдоль оси Z: у ноутбука он наклонён вместе с крышкой, у внешнего экрана Duo
+ * развёрнут назад. Нормаль берётся из треугольников, верх — мировая ось Y,
+ * спроецированная на плоскость, поэтому картинка стоит прямо при любом
+ * наклоне.
+ */
+interface ScreenFrame { u: THREE.Vector3; v: THREE.Vector3; normal: THREE.Vector3; minU: number; minV: number; width: number; height: number; top: number }
+
+function screenFrame(mesh: THREE.Mesh, root: THREE.Object3D, mirror: boolean): ScreenFrame {
   const positions = mesh.geometry.getAttribute("position");
+  const index = mesh.geometry.getIndex();
+  const normal = new THREE.Vector3();
+  const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+  const count = index ? index.count : positions.count;
+  for (let corner = 0; corner + 2 < count; corner += 3) {
+    a.fromBufferAttribute(positions, index ? index.getX(corner) : corner);
+    b.fromBufferAttribute(positions, index ? index.getX(corner + 1) : corner + 1);
+    c.fromBufferAttribute(positions, index ? index.getX(corner + 2) : corner + 2);
+    normal.add(b.sub(a).cross(c.sub(a)));
+  }
+  normal.normalize();
+  const toRoot = new THREE.Matrix4().copy(root.matrixWorld).invert().multiply(mesh.matrixWorld);
+  const toLocal = toRoot.clone().invert();
+  const v = new THREE.Vector3(0, 1, 0).transformDirection(toLocal).projectOnPlane(normal);
+  if (v.lengthSq() < 1e-8) v.set(0, 0, -1).transformDirection(toLocal).projectOnPlane(normal);
+  v.normalize();
+  const u = new THREE.Vector3().crossVectors(v, normal).normalize();
+  // Зеркальное преобразование в иерархии разворачивает изображение.
+  if (toRoot.determinant() < 0 !== mirror) u.negate();
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity, top = -Infinity;
+  for (let vertex = 0; vertex < positions.count; vertex++) {
+    a.fromBufferAttribute(positions, vertex);
+    minU = Math.min(minU, a.dot(u)); maxU = Math.max(maxU, a.dot(u));
+    minV = Math.min(minV, a.dot(v)); maxV = Math.max(maxV, a.dot(v));
+    top = Math.max(top, a.dot(normal));
+  }
+  return { u, v, normal, minU, minV, width: maxU - minU, height: maxV - minV, top };
+}
+
+function mapScreenUV(geometry: THREE.BufferGeometry, frame: ScreenFrame) {
+  const positions = geometry.getAttribute("position");
   const uvs = new Float32Array(positions.count * 2);
-  const size = bounds.getSize(new THREE.Vector3());
   const point = new THREE.Vector3();
   for (let index = 0; index < positions.count; index++) {
-    point.fromBufferAttribute(positions, index).applyMatrix4(mesh.matrixWorld);
-    uvs[index * 2] = (point.x - bounds.min.x) / size.x;
-    uvs[index * 2 + 1] = (point.y - bounds.min.y) / size.y;
+    point.fromBufferAttribute(positions, index);
+    uvs[index * 2] = (point.dot(frame.u) - frame.minU) / frame.width;
+    uvs[index * 2 + 1] = (point.dot(frame.v) - frame.minV) / frame.height;
   }
-  mesh.geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  geometry.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
 }
+
+/** Экран модели: у Duo их два, изображение выводится на активный. */
+interface ScreenSlot { mesh: THREE.Mesh; aspect: number; inset: [number, number]; cutout: THREE.Object3D[]; patch: THREE.Mesh | null }
 
 export class StudioScene {
   readonly renderer: THREE.WebGLRenderer;
@@ -59,7 +100,7 @@ export class StudioScene {
   private readonly perspective = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
   private readonly orthographic = new THREE.OrthographicCamera(-2, 2, 1.5, -1.5, 0.01, 100);
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = this.perspective;
-  private readonly phone = new THREE.Group();
+  private readonly device = new THREE.Group();
   private readonly lightRig = new THREE.Group();
   private readonly key = new THREE.DirectionalLight(0xfff8ed, 3);
   private readonly fill = new THREE.DirectionalLight(0xdde6ff, 2);
@@ -71,13 +112,16 @@ export class StudioScene {
   private readonly screenCanvas = document.createElement("canvas");
   private readonly screenTexture: THREE.CanvasTexture;
   private readonly screenMaterial: THREE.MeshBasicMaterial;
+  /** Неактивный экран Duo: выключенная матрица. */
+  private readonly offMaterial = new THREE.MeshBasicMaterial({ color: 0x080909, toneMapped: false });
   private reflectionMaterial: THREE.MeshPhysicalMaterial | null = null;
   private backgroundTexture: THREE.CanvasTexture | null = null;
-  private screenAspect = 1290 / 2796;
   private screenImage: HTMLImageElement | null = null;
-  private hiddenIsland: THREE.Object3D[] = [];
-  private islandPatch: THREE.Mesh | null = null;
+  private screens = new Map<string, ScreenSlot>();
+  private screen: ScreenSlot | null = null;
   private model: THREE.Group | null = null;
+  private normalized: THREE.Group | null = null;
+  private mixer: THREE.AnimationMixer | null = null;
   private settings: Settings;
   private frame = 0;
   private publishFrame = 0;
@@ -98,7 +142,7 @@ export class StudioScene {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.setClearColor(0x000000, 0);
-    this.renderer.domElement.setAttribute("aria-label", "3D-превью телефона. Перетаскивайте для вращения, удерживайте Space для перемещения рабочей области.");
+    this.renderer.domElement.setAttribute("aria-label", "3D-превью устройства. Перетаскивайте для вращения, удерживайте Space для перемещения рабочей области.");
     this.renderer.domElement.setAttribute("role", "img");
     this.renderer.domElement.addEventListener("webglcontextlost", this.handleContextLost);
     this.host.appendChild(this.renderer.domElement);
@@ -108,7 +152,7 @@ export class StudioScene {
     this.scene.environment = this.environment.texture;
     room.dispose();
     pmrem.dispose();
-    this.scene.add(this.phone);
+    this.scene.add(this.device);
     this.key.position.set(-3, 4, 5);
     this.fill.position.set(4, 1, 3);
     this.rim.position.set(-2, 2, -4);
@@ -214,7 +258,7 @@ export class StudioScene {
     this.camera.zoom = zoom / 100;
     this.camera.lookAt(0, 0, 0);
     this.controls.target.set(0, 0, 0);
-    this.phone.rotation.z = THREE.MathUtils.degToRad(roll);
+    this.device.rotation.z = THREE.MathUtils.degToRad(roll);
     this.updateProjection(this.width, this.height);
     this.controls.update();
     this.controls.enableDamping = damping;
@@ -253,8 +297,12 @@ export class StudioScene {
         this.scene.background = this.backgroundTexture;
       }
     }
-    this.hiddenIsland.forEach((object) => { object.visible = screen.island; });
-    if (this.islandPatch) this.islandPatch.visible = !screen.island;
+    // Вырез прячется только на активном экране; на втором он остаётся как есть.
+    this.screens.forEach((slot) => {
+      const hide = slot === this.screen && !screen.island;
+      slot.cutout.forEach((object) => { object.visible = !hide; });
+      if (slot.patch) slot.patch.visible = hide;
+    });
     if (this.reflectionMaterial) this.reflectionMaterial.opacity = screen.reflection / 100;
     this.needsRender = true;
   }
@@ -266,6 +314,7 @@ export class StudioScene {
     if (JSON.stringify(old.screen) !== JSON.stringify(next.screen)) this.drawScreen();
     if (JSON.stringify([old.light, old.background, old.screen.island, old.screen.reflection]) !== JSON.stringify([next.light, next.background, next.screen.island, next.screen.reflection])) this.applyEnvironment();
     if (old.device !== next.device || old.finish !== next.finish) void this.loadModel();
+    else if (old.fold !== next.fold) this.applyFold();
   }
 
   setInteractionEnabled(enabled: boolean) {
@@ -291,8 +340,10 @@ export class StudioScene {
   }
 
   /** Размер текстуры экрана в пикселях: под него снимаются сайты и фреймы Figma. */
+  /** Активная область экрана в пикселях холста, без чёрной рамки монитора. */
   get screenSize() {
-    return { width: this.screenCanvas.width, height: this.screenCanvas.height };
+    const [insetX, insetY] = this.screen?.inset ?? [0, 0];
+    return { width: Math.round(this.screenCanvas.width * (1 - insetX * 2)), height: Math.round(this.screenCanvas.height * (1 - insetY * 2)) };
   }
 
   /** Возвращает экран к пустому состоянию. */
@@ -316,25 +367,124 @@ export class StudioScene {
     const context = this.screenCanvas.getContext("2d");
     if (!context) return;
     const { fit, scale, x, y } = this.settings.screen;
-    const width = this.screenCanvas.width, height = this.screenCanvas.height;
+    const [insetX, insetY] = this.screen?.inset ?? [0, 0];
+    const left = this.screenCanvas.width * insetX, top = this.screenCanvas.height * insetY;
+    const width = this.screenCanvas.width - left * 2, height = this.screenCanvas.height - top * 2;
     const image = this.screenImage;
     context.fillStyle = "#080909";
-    context.fillRect(0, 0, width, height);
+    context.fillRect(0, 0, this.screenCanvas.width, this.screenCanvas.height);
     if (image) {
       const ratio = (fit === "cover" ? Math.max(width / image.naturalWidth, height / image.naturalHeight) : Math.min(width / image.naturalWidth, height / image.naturalHeight)) * scale / 100;
       const drawWidth = image.naturalWidth * ratio, drawHeight = image.naturalHeight * ratio;
-      context.drawImage(image, (width - drawWidth) / 2 + x / 100 * width, (height - drawHeight) / 2 + y / 100 * height, drawWidth, drawHeight);
+      // Рамка монитора остаётся чёрной: изображение обрезается по активной области.
+      context.save();
+      context.beginPath(); context.rect(left, top, width, height); context.clip();
+      context.drawImage(image, left + (width - drawWidth) / 2 + x / 100 * width, top + (height - drawHeight) / 2 + y / 100 * height, drawWidth, drawHeight);
+      context.restore();
     }
     this.screenTexture.needsUpdate = true;
     this.needsRender = true;
   }
 
+  /**
+   * Готовит экран модели: развёртку под изображение, отражение на стекле и
+   * заплатку на месте выреза камеры. Всё строится в локальных координатах
+   * меша и вешается на него же, поэтому повторяет движение шарнира Duo.
+   */
+  private buildScreen(root: THREE.Object3D, config: ScreenConfig, reflectionMaterial: THREE.Material): ScreenSlot {
+    let found: THREE.Mesh | undefined;
+    root.traverse((object) => { if (object instanceof THREE.Mesh && object.name === config.mesh) found = object; });
+    if (!found) throw new Error("В модели не найдена поверхность экрана.");
+    const mesh: THREE.Mesh = found;
+    const frame = screenFrame(mesh, root, config.mirror ?? false);
+    mesh.geometry = mesh.geometry.clone();
+    mapScreenUV(mesh.geometry, frame);
+    const oldMaterial = mesh.material;
+    mesh.material = this.offMaterial;
+    for (const material of Array.isArray(oldMaterial) ? oldMaterial : [oldMaterial]) {
+      for (const texture of Object.values(material)) if (texture instanceof THREE.Texture) texture.dispose();
+      material.dispose();
+    }
+    if (mesh instanceof THREE.SkinnedMesh) {
+      const reflection = new THREE.SkinnedMesh(mesh.geometry, reflectionMaterial);
+      reflection.position.copy(mesh.position); reflection.quaternion.copy(mesh.quaternion); reflection.scale.copy(mesh.scale);
+      mesh.parent?.add(reflection);
+      reflection.bind(mesh.skeleton, mesh.bindMatrix);
+    } else mesh.add(new THREE.Mesh(mesh.geometry, reflectionMaterial));
+    const cutout: THREE.Object3D[] = [];
+    root.traverse((object) => { if (config.cutout.includes(object.name)) cutout.push(object); });
+    let patch: THREE.Mesh | null = null;
+    if (cutout.length) {
+      const toScreen = new THREE.Matrix4().copy(mesh.matrixWorld).invert();
+      const point = new THREE.Vector3();
+      let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+      cutout.forEach((object) => object.traverse((child) => {
+        if (!(child instanceof THREE.Mesh)) return;
+        const positions = child.geometry.getAttribute("position");
+        const matrix = toScreen.clone().multiply(child.matrixWorld);
+        for (let index = 0; index < positions.count; index++) {
+          point.fromBufferAttribute(positions, index).applyMatrix4(matrix);
+          minU = Math.min(minU, point.dot(frame.u)); maxU = Math.max(maxU, point.dot(frame.u));
+          minV = Math.min(minV, point.dot(frame.v)); maxV = Math.max(maxV, point.dot(frame.v));
+        }
+      }));
+      const pad = frame.height * 0.0005;
+      const width = maxU - minU + pad, height = maxV - minV + pad;
+      const geometry = new THREE.ShapeGeometry(roundedShape(width, height, Math.min(width, height) / 2), 32);
+      const center = frame.u.clone().multiplyScalar((minU + maxU) / 2).addScaledVector(frame.v, (minV + maxV) / 2).addScaledVector(frame.normal, frame.top + frame.height * 0.00002);
+      geometry.applyMatrix4(new THREE.Matrix4().makeBasis(frame.u, frame.v, frame.normal).setPosition(center));
+      mapScreenUV(geometry, frame);
+      patch = new THREE.Mesh(geometry, this.screenMaterial);
+      // Без своего блика заплатка темнее стекла вокруг и читается как точка.
+      patch.add(new THREE.Mesh(geometry, reflectionMaterial));
+      patch.visible = false;
+      mesh.add(patch);
+    }
+    return { mesh, aspect: frame.width / frame.height, inset: config.inset ?? [0, 0], cutout, patch };
+  }
+
+  /** Ставит шарнир Duo, выбирает активный экран и заново центрирует модель. */
+  private applyFold() {
+    const model = deviceModel(this.settings.device);
+    if (!this.model || !this.normalized) return;
+    const pose = model.fold?.poses[this.settings.fold];
+    if (this.mixer && pose) this.mixer.setTime(pose.time);
+    this.normalized.rotation.y = THREE.MathUtils.degToRad(pose?.yaw ?? 0);
+    const next = this.screens.get(activeScreen(this.settings.device, this.settings.fold).mesh) ?? null;
+    this.screens.forEach((slot) => { slot.mesh.material = slot === next ? this.screenMaterial : this.offMaterial; });
+    if (next && next !== this.screen) {
+      // Телефон — в родной ширине Pro Max, 1290 px: в неё же снимается сайт по
+      // ссылке. Горизонтальный экран ноутбука и монитора — 2796 px в ширину.
+      const width = next.aspect >= 1 ? 2796 : 1290;
+      this.screenCanvas.width = width;
+      this.screenCanvas.height = Math.round(width / next.aspect);
+      // Размер холста поменялся: старое хранилище текстуры на GPU уже не подходит.
+      this.screenTexture.dispose();
+    }
+    this.screen = next;
+    // Центр считается без поворота сцены, иначе крен сдвинет модель.
+    const parent = this.model.parent;
+    parent?.remove(this.model);
+    this.normalized.position.set(0, 0, 0);
+    this.model.updateMatrixWorld(true);
+    // Рамка Duo пересчитывается по позе шарнира. Только после
+    // updateMatrixWorld: до него у скиннинга устаревшая обратная матрица
+    // привязки, и рамка уезжает на масштаб модели.
+    this.model.traverse((object) => { if (object instanceof THREE.SkinnedMesh) object.computeBoundingBox(); });
+    const center = new THREE.Box3().setFromObject(this.model).getCenter(new THREE.Vector3());
+    this.normalized.position.copy(center).negate();
+    parent?.add(this.model);
+    this.drawScreen();
+    this.applyEnvironment();
+  }
+
   private async loadModel() {
     const request = ++this.modelRequest;
-    const config = modelConfig(this.settings.device, this.settings.finish);
+    const model = deviceModel(this.settings.device);
     this.callbacks.model({ status: "loading" });
     try {
-      const gltf = await new GLTFLoader().loadAsync(config.path);
+      const loader = new GLTFLoader().register((parser) => new SpecularGlossinessPlugin(parser));
+      const gltf = await loader.loadAsync(deviceFinish(model.id, this.settings.finish).path);
       if (this.disposed || request !== this.modelRequest) { disposeObject(gltf.scene); return; }
       const root = gltf.scene;
       // Текстуры корпуса приходят без анизотропии: под углом и на наезде их
@@ -349,60 +499,47 @@ export class StudioScene {
           }
         }
       });
-      root.rotation.y += config.rotateY;
+      root.rotation.y += model.rotateY;
       root.updateMatrixWorld(true);
-      const sourceBounds = new THREE.Box3().setFromObject(root);
-      const scale = 2 / sourceBounds.getSize(new THREE.Vector3()).y;
-      root.position.sub(sourceBounds.getCenter(new THREE.Vector3()));
+      // Телефон вписывается по высоте, монитор — по ширине: иначе широкая
+      // модель вылезает за кадр 4:3 в студийном ракурсе. Глубина ограничивает ноутбук: в
+      // перспективе передний край клавиатуры иначе подъезжает к камере.
+      const size = new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3());
+      const scale = Math.min(2 / size.y, 2.3 / size.x, 1.9 / size.z);
       const normalized = new THREE.Group();
-      normalized.add(root); normalized.scale.setScalar(scale); normalized.updateMatrixWorld(true);
-      let display: THREE.Mesh | undefined;
-      root.traverse((object) => { if (object instanceof THREE.Mesh && object.name === config.screen) display = object; });
-      if (!display) { disposeObject(normalized); throw new Error("В модели не найдена поверхность экрана."); }
-      const sourceScreen: THREE.Mesh = display;
-      const screenBounds = new THREE.Box3().setFromObject(sourceScreen);
-      const screenSize = screenBounds.getSize(new THREE.Vector3());
-      this.screenAspect = screenSize.x / screenSize.y;
-      this.screenCanvas.width = 1290;
-      this.screenCanvas.height = Math.round(1290 / this.screenAspect);
-      mapScreenUV(sourceScreen, screenBounds);
-      const oldMaterial = sourceScreen.material;
-      sourceScreen.material = this.screenMaterial;
-      for (const material of Array.isArray(oldMaterial) ? oldMaterial : [oldMaterial]) {
-        for (const texture of Object.values(material)) if (texture instanceof THREE.Texture) texture.dispose();
-        material.dispose();
-      }
+      normalized.add(root); normalized.scale.setScalar(scale);
       const replacement = new THREE.Group();
       replacement.add(normalized);
-      const hidden: THREE.Object3D[] = [];
-      root.traverse((object) => { if (config.hide.includes(object.name)) hidden.push(object); });
-      const islandBounds = new THREE.Box3();
-      hidden.forEach((object) => islandBounds.union(new THREE.Box3().setFromObject(object)));
-      const islandSize = islandBounds.getSize(new THREE.Vector3());
-      const islandCenter = islandBounds.getCenter(new THREE.Vector3());
-      const patch = new THREE.Mesh(new THREE.ShapeGeometry(roundedShape(islandSize.x + 0.001, islandSize.y + 0.001, islandSize.y / 2), 32), this.screenMaterial);
-      patch.position.set(islandCenter.x, islandCenter.y, screenBounds.max.z + 0.00004);
-      replacement.add(patch);
       replacement.updateMatrixWorld(true);
-      mapScreenUV(patch, screenBounds);
       const reflectionMaterial = new THREE.MeshPhysicalMaterial({ color: 0xffffff, metalness: 0.15, roughness: 0.15, transparent: true, opacity: this.settings.screen.reflection / 100, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 });
-      const reflection = new THREE.Mesh(sourceScreen.geometry, reflectionMaterial);
-      sourceScreen.updateWorldMatrix(true, false);
-      reflection.applyMatrix4(sourceScreen.matrixWorld);
-      replacement.add(reflection);
+      const screens = new Map<string, ScreenSlot>();
+      try {
+        for (const config of model.fold ? [model.screen, model.fold.outer] : [model.screen]) screens.set(config.mesh, this.buildScreen(root, config, reflectionMaterial));
+      } catch (error) { disposeObject(replacement); reflectionMaterial.dispose(); throw error; }
+      let mixer: THREE.AnimationMixer | null = null;
+      const clip = model.fold && gltf.animations.find((item) => item.name === model.fold?.clip);
+      if (clip) {
+        mixer = new THREE.AnimationMixer(root);
+        const action = mixer.clipAction(clip);
+        action.setLoop(THREE.LoopOnce, 1);
+        action.clampWhenFinished = true;
+        action.play();
+      }
       if (this.model) {
-        this.phone.remove(this.model);
-        // Материал экрана общий для всех моделей; освобождаем только ресурсы старой модели.
-        this.model.traverse((object) => { if (object instanceof THREE.Mesh && object.material === this.screenMaterial) object.material = new THREE.MeshBasicMaterial(); });
+        this.device.remove(this.model);
+        // Материалы экрана общие для всех моделей; освобождаем только ресурсы старой модели.
+        this.model.traverse((object) => { if (object instanceof THREE.Mesh && (object.material === this.screenMaterial || object.material === this.offMaterial)) object.material = new THREE.MeshBasicMaterial(); });
         disposeObject(this.model);
       }
+      this.mixer?.stopAllAction();
       this.model = replacement;
-      this.hiddenIsland = hidden;
-      this.islandPatch = patch;
+      this.normalized = normalized;
+      this.mixer = mixer;
+      this.screens = screens;
+      this.screen = null;
       this.reflectionMaterial = reflectionMaterial;
-      this.phone.add(replacement);
-      this.drawScreen();
-      this.applyEnvironment();
+      this.device.add(replacement);
+      this.applyFold();
       this.needsRender = true;
       this.callbacks.model({ status: "ready" });
     } catch (error) {
@@ -440,7 +577,7 @@ export class StudioScene {
     this.controls.dispose();
     this.renderer.domElement.removeEventListener("webglcontextlost", this.handleContextLost);
     if (this.model) disposeObject(this.model);
-    this.screenMaterial.dispose(); this.screenTexture.dispose();
+    this.screenMaterial.dispose(); this.offMaterial.dispose(); this.screenTexture.dispose();
     this.backgroundTexture?.dispose(); this.environment.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();

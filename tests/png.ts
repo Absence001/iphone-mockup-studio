@@ -27,6 +27,21 @@ export function testImage(): Buffer {
   return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
 }
 
+/** Четыре цвета по углам: красный, зелёный сверху, синий, жёлтый снизу. Ловит зеркальный экран. */
+export function quadImage(): Buffer {
+  const width = 160, height = 120, header = Buffer.alloc(13);
+  header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6;
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const index = y * (width * 4 + 1) + 1 + x * 4;
+    const color = y < height / 2 ? (x < width / 2 ? QUAD.red : QUAD.green) : (x < width / 2 ? QUAD.blue : QUAD.yellow);
+    raw[index] = color[0]; raw[index + 1] = color[1]; raw[index + 2] = color[2]; raw[index + 3] = 255;
+  }
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header), chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+}
+
+export const QUAD = { red: [235, 30, 30], green: [30, 220, 100], blue: [30, 60, 220], yellow: [240, 210, 40] } as const;
+
 export function decodePNG(buffer: Buffer) {
   const width = buffer.readUInt32BE(16), height = buffer.readUInt32BE(20), depth = buffer[24], type = buffer[25];
   if (depth !== 8 || ![2, 6].includes(type)) throw new Error(`Неподдерживаемый формат PNG в проверке: ${depth}/${type}`);

@@ -3,7 +3,7 @@ import { readFile, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { historyReducer, INITIAL_HISTORY } from "../src/lib/history";
 import { parseProject } from "../src/lib/project";
-import { decodePNG, testImage } from "./png";
+import { QUAD, decodePNG, quadImage, testImage } from "./png";
 
 async function ready(page: Page) { await expect(page.getByRole("button", { name: "Скачать мокап" })).toBeEnabled(); }
 async function start(page: Page) { await page.goto("/"); await ready(page); }
@@ -13,7 +13,7 @@ async function choose(page: Page, label: string, name: string) {
   await expect(page.getByRole("listbox")).toHaveCount(0);
 }
 async function preset(page: Page, name: string) { await choose(page, "Ракурс", name); }
-async function device(page: Page, id: "iphone15" | "iphone18") { await choose(page, "Модель телефона", id === "iphone15" ? "iPhone 15 Pro Max" : "iPhone 18 Pro Max"); }
+async function device(page: Page, name: string) { await choose(page, "Модель устройства", name); }
 async function exportPNG(page: Page) {
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "Скачать мокап" }).click();
@@ -36,6 +36,10 @@ test("история объединяет жест и сохраняет вет�
   state = historyReducer(state, { type: "change", recipe: change(60), time: 200 });
   expect(state.future).toHaveLength(0);
   expect(() => parseProject(JSON.stringify({ app: "forma", version: 1, settings: { ...INITIAL_HISTORY.present.settings, camera: { ...INITIAL_HISTORY.present.settings.camera, focalLength: "не число" } }, imageData: null }))).toThrow();
+  // Проект до появления Duo: без сгиба, цвет чужой модели заменяется доступным.
+  const { fold: _fold, ...legacy } = INITIAL_HISTORY.present.settings;
+  const old = parseProject(JSON.stringify({ app: "forma", version: 1, settings: { ...legacy, device: "iphone15", finish: "glacier" }, imageData: null }));
+  expect(old.settings.fold).toBe("open"); expect(old.settings.finish).toBe("black");
 });
 
 test("прямой ракурс по умолчанию, темы без ошибок React и независимый PNG", async ({ page }) => {
@@ -109,7 +113,7 @@ test("навигация как в редакторе, отмена пресет
   expect(errors).toEqual([]);
 });
 
-test("пять моделей, ракурсы, изображение, отмена и сохранение проекта", async ({ page }) => {
+test("модели iPhone, ракурсы, изображение, отмена и сохранение проекта", async ({ page }) => {
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await start(page);
   await page.locator('input[type="file"]').setInputFiles({ name: "экран.png", mimeType: "image/png", buffer: testImage() });
@@ -118,7 +122,7 @@ test("пять моделей, ракурсы, изображение, отме�
   await preset(page, "Прямо");
   await page.getByRole("tab", { name: "Экран", exact: true }).click();
   await page.getByRole("spinbutton", { name: "Отражения на стекле", exact: true }).fill("0");
-  await device(page, "iphone18"); await ready(page);
+  await device(page, "iPhone 18 Pro Max"); await ready(page);
   for (const finish of ["Glacier", "Burgundy", "Silver", "Black"]) {
     await choose(page, "Цвет корпуса", finish); await ready(page);
     await expect(page.getByRole("combobox", { name: "Цвет корпуса", exact: true })).toContainText(finish);
@@ -142,9 +146,9 @@ test("пять моделей, ракурсы, изображение, отме�
   const project = await saved, path = await project.path(); if (!path) throw new Error("Нет файла проекта");
   const parsed = parseProject(await readFile(path, "utf8"));
   expect(parsed.settings.finish).toBe("burgundy"); expect(parsed.imageData).toMatch(/^data:image\/png;base64,/);
-  await device(page, "iphone15"); await ready(page);
+  await device(page, "iPhone 15 Pro Max"); await ready(page);
   await page.locator('input[type="file"]').setInputFiles({ name: "проект.forma.json", mimeType: "application/json", buffer: Buffer.from(await readFile(path)) }); await ready(page);
-  await expect(page.getByRole("combobox", { name: "Модель телефона", exact: true })).toContainText("iPhone 18 Pro Max");
+  await expect(page.getByRole("combobox", { name: "Модель устройства", exact: true })).toContainText("iPhone 18 Pro Max");
   await expect(page.getByRole("combobox", { name: "Цвет корпуса", exact: true })).toContainText("Burgundy");
   await page.getByRole("button", { name: "Убрать изображение", exact: true }).click();
   await page.keyboard.press("Control+z"); await expect(page.getByText("экран.png", { exact: true })).toBeVisible();
@@ -187,6 +191,62 @@ test("PNG 4K: размеры, альфа-канал, ориентация экр
   await preset(page, "Прямо");
   const noIsland = decodePNG(await exportPNG(page));
   expect(noIsland.pixel(noIsland.width / 2, noIsland.height * 0.195)[0], "Отключённый вырез камеры должен заполниться изображением").toBeGreaterThan(200);
+});
+
+/** Средние координаты пикселей каждого цвета квадранта на кадре. */
+function quadrants(png: ReturnType<typeof decodePNG>) {
+  const sums = Object.fromEntries(Object.keys(QUAD).map((name) => [name, { x: 0, y: 0, count: 0 }])) as Record<keyof typeof QUAD, { x: number; y: number; count: number }>;
+  for (let y = 0; y < png.height; y += 2) for (let x = 0; x < png.width; x += 2) {
+    const [r, g, b] = png.pixel(x, y);
+    for (const [name, color] of Object.entries(QUAD) as [keyof typeof QUAD, readonly number[]][]) {
+      if (Math.abs(r - color[0]) + Math.abs(g - color[1]) + Math.abs(b - color[2]) < 40) { sums[name].x += x; sums[name].y += y; sums[name].count++; }
+    }
+  }
+  return Object.fromEntries(Object.entries(sums).map(([name, sum]) => [name, { x: sum.x / sum.count, y: sum.y / sum.count, count: sum.count }])) as Record<keyof typeof QUAD, { x: number; y: number; count: number }>;
+}
+
+test("Android, Duo, MacBook и монитор: экран без зеркала, сгиб и проект", async ({ page }) => {
+  const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
+  await start(page);
+  await page.locator('input[type="file"]').setInputFiles({ name: "quad.png", mimeType: "image/png", buffer: quadImage() });
+  await expect(page.getByText("quad.png", { exact: true })).toBeVisible();
+  await page.getByLabel("Разрешение", { exact: true }).selectOption("1200");
+  await page.getByRole("tab", { name: "Экран", exact: true }).click();
+  await page.getByRole("spinbutton", { name: "Отражения на стекле", exact: true }).fill("0");
+  const check = async (label: string) => {
+    const quad = quadrants(decodePNG(await exportPNG(page)));
+    for (const [name, value] of Object.entries(quad)) expect(value.count, `${label}: на экране нет цвета ${name}`).toBeGreaterThan(200);
+    expect(quad.red.x, `${label}: красный должен быть слева`).toBeLessThan(quad.green.x);
+    expect(quad.blue.x, `${label}: синий должен быть слева`).toBeLessThan(quad.yellow.x);
+    expect(quad.red.y, `${label}: красный должен быть сверху`).toBeLessThan(quad.blue.y);
+  };
+  for (const name of ["Galaxy S26 Ultra", "MacBook Pro 14″", "Pro Display XDR"]) {
+    await device(page, name); await ready(page);
+    await expect(page.getByText("quad.png", { exact: true })).toBeVisible();
+    await preset(page, "Прямо");
+    await check(name);
+  }
+  await expect(page.getByRole("checkbox", { name: "Вырез камеры" })).toHaveCount(0);
+  await page.getByRole("combobox", { name: "Ракурс", exact: true }).click();
+  await expect(page.getByRole("option", { name: "Сзади", exact: true })).toBeVisible();
+  await expect(page.getByRole("option", { name: "Горизонтально", exact: true })).toHaveCount(0);
+  await page.keyboard.press("Escape"); await expect(page.getByRole("listbox")).toHaveCount(0);
+  await device(page, "iPhone Duo"); await ready(page);
+  await expect(page.getByRole("checkbox", { name: "Вырез камеры" })).toHaveCount(0);
+  for (const fold of ["Раскрыт", "Книжкой", "Сложен"]) {
+    await page.getByRole("button", { name: fold, exact: true }).click(); await ready(page);
+    await check(`iPhone Duo, ${fold}`);
+  }
+  // У сложенного Duo изображение на внешнем экране с вырезом камеры.
+  await expect(page.getByRole("checkbox", { name: "Вырез камеры" })).toBeVisible();
+  const saved = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Сохранить проект (Ctrl+S)", exact: true }).click();
+  const project = await saved, path = await project.path(); if (!path) throw new Error("Нет файла проекта");
+  const parsed = parseProject(await readFile(path, "utf8"));
+  expect(parsed.settings.device).toBe("iphoneDuo"); expect(parsed.settings.fold).toBe("closed"); expect(parsed.settings.finish).toBe("starWhite");
+  await page.keyboard.press("Control+z");
+  await expect(page.getByRole("button", { name: "Книжкой", exact: true })).toHaveAttribute("aria-pressed", "true");
+  expect(errors).toEqual([]);
 });
 
 test("ошибки файлов, клавиатурные вкладки и адаптивный интерфейс", async ({ page }) => {
@@ -232,7 +292,7 @@ test("минимальный интерфейс, понятный свет и с
 });
 
 test("вставка из буфера обмена и по ссылке на сайт или фрейм Figma", async ({ page }) => {
-  const requests: { url: string; width: number; height: number }[] = [];
+  const requests: { url: string; width: number; height: number; desktop: boolean }[] = [];
   let reply: { status: number; body: Buffer | string; contentType: string } = { status: 200, body: testImage(), contentType: "image/png" };
   await page.route("**/api/capture", async (route) => {
     requests.push(route.request().postDataJSON());
@@ -271,4 +331,13 @@ test("вставка из буфера обмена и по ссылке на с
   await expect(page.locator('.toast[role="alert"]')).toContainText("Сайт ответил ошибкой 404.");
   expect(requests.at(-1)?.url).toBe("https://www.figma.com/design/abc/Test?node-id=1-2");
   await expect(card).toContainText("example.com.png");
+
+  // MacBook снимает сайт в настольной вёрстке и в ширину своего экрана.
+  reply = { status: 200, body: testImage(), contentType: "image/png" };
+  expect(requests[0].desktop).toBe(false);
+  await device(page, "MacBook Pro 14″"); await ready(page);
+  await field.fill("example.com"); await field.press("Enter");
+  await expect(page.locator('.toast[role="status"]')).toContainText("Сайт на экране");
+  expect(requests.at(-1)).toMatchObject({ width: 2796, desktop: true });
+  expect(requests.at(-1)!.height).toBeGreaterThan(1750); expect(requests.at(-1)!.height).toBeLessThan(1900);
 });

@@ -8,6 +8,8 @@ export const maxDuration = 60;
 
 /** Плотность пикселей iPhone Pro Max: 1290 px экрана — это 430 pt вёрстки. */
 const PIXEL_RATIO = 3;
+/** Retina у MacBook и Pro Display XDR: 3024 px экрана — это 1512 pt. */
+const DESKTOP_PIXEL_RATIO = 2;
 
 class CaptureError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
@@ -57,14 +59,15 @@ async function launch(): Promise<Browser> {
   throw new CaptureError("Не найден браузер для снимка сайта. Установите Chrome или Edge либо выполните npx playwright install chromium.", 500);
 }
 
-async function captureSite(url: URL, width: number, height: number) {
+async function captureSite(url: URL, width: number, height: number, desktop: boolean) {
   await assertPublicHost(url.hostname);
   const browser = await launch();
   try {
+    const ratio = desktop ? DESKTOP_PIXEL_RATIO : PIXEL_RATIO;
     const context = await browser.newContext({
-      userAgent: devices["iPhone 15 Pro Max"].userAgent,
-      viewport: { width: Math.round(width / PIXEL_RATIO), height: Math.round(height / PIXEL_RATIO) },
-      deviceScaleFactor: PIXEL_RATIO, isMobile: true, hasTouch: true, locale: "ru-RU",
+      ...(desktop ? {} : { userAgent: devices["iPhone 15 Pro Max"].userAgent, isMobile: true, hasTouch: true }),
+      viewport: { width: Math.round(width / ratio), height: Math.round(height / ratio) },
+      deviceScaleFactor: ratio, locale: "ru-RU",
     });
     const page = await context.newPage();
     let response;
@@ -123,12 +126,13 @@ export async function POST(request: Request) {
   try {
     let body: Record<string, unknown>;
     try { body = await request.json(); } catch { throw new CaptureError("Неверный запрос."); }
-    const width = size(body.width, 200, 2000), height = size(body.height, 200, 4000);
+    // Экран ноутбука и монитора шире телефонного: до 2796 px по длинной стороне.
+    const width = size(body.width, 200, 3000), height = size(body.height, 200, 4000);
     let url: URL;
     try { url = new URL(String(body.url)); } catch { throw new CaptureError("Это не похоже на ссылку. Вставьте адрес вида https://example.com."); }
     if (url.protocol !== "https:" && url.protocol !== "http:") throw new CaptureError("Поддерживаются только ссылки http и https.");
     const figma = /(^|\.)figma\.com$/i.test(url.hostname);
-    const { image, name } = figma ? await captureFigma(url, width) : await captureSite(url, width, height);
+    const { image, name } = figma ? await captureFigma(url, width) : await captureSite(url, width, height, body.desktop === true);
     return new Response(new Uint8Array(image), { headers: { "Content-Type": "image/png", "Cache-Control": "no-store", "X-Capture-Name": encodeURIComponent(name.slice(0, 120)) } });
   } catch (error) {
     if (error instanceof CaptureError) return fail(error.message, error.status);

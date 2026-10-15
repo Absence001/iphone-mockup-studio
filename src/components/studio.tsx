@@ -9,26 +9,32 @@ import { FluidChoice } from "./fluid-choice";
 import { ThemeToggle } from "./theme-toggle";
 import { Control, Segmented } from "./control";
 import { Viewport, type ModelState, type NavigationCommand } from "./viewport";
-import { DEFAULT_CAMERA, DEFAULT_SETTINGS, PRESETS, clamp, exportSize, type Aspect, type CameraSettings, type ScreenFit, type Settings } from "@/lib/settings";
-import { DEVICES, FINISHES } from "@/lib/models";
+import { DEFAULT_CAMERA, DEFAULT_SETTINGS, PRESETS, clamp, exportSize, type Aspect, type CameraSettings, type Device, type Fold, type ScreenFit, type Settings } from "@/lib/settings";
+import { DEVICES, activeScreen, deviceFinish, deviceModel } from "@/lib/models";
 import { INITIAL_DOCUMENT, INITIAL_HISTORY, historyReducer, type DocumentState } from "@/lib/history";
 import { parseProject, projectDocument, serializeProject } from "@/lib/project";
 import { captureLink, isFigmaClipboard, isFigmaLink, normalizeLink } from "@/lib/capture";
 import { spring } from "@/lib/springs";
 import type { StudioScene } from "@/lib/scene";
 
-/** Пропорция экрана телефона: 1290 × 2796. */
-const SCREEN_RATIO = 1290 / 2796;
-
 /**
- * Снимок близкой пропорции заполняет экран целиком, всё остальное
+ * Снимок близкой к экрану пропорции заполняет экран целиком, всё остальное
  * вписывается. Иначе от широкого кадра остаётся узкая центральная полоса, и
  * выглядит это так, будто изображение вообще не загрузилось.
  */
-function fitForImage(width: number, height: number): ScreenFit {
+function fitForImage(width: number, height: number, screenRatio: number): ScreenFit {
   if (!width || !height) return "cover";
-  return Math.abs(Math.log(width / height / SCREEN_RATIO)) < 0.35 ? "cover" : "contain";
+  return Math.abs(Math.log(width / height / screenRatio)) < 0.35 ? "cover" : "contain";
 }
+
+/** Смена модели или сгиба меняет экран: вписывание пересчитывается под него. */
+function withScreen(current: DocumentState, device: Device, fold: Fold): DocumentState {
+  const settings = { ...current.settings, device, fold, finish: deviceFinish(device, current.settings.finish).id };
+  if (current.image.demo) return { ...current, settings };
+  return { ...current, settings: { ...settings, screen: { ...settings.screen, fit: fitForImage(current.image.width, current.image.height, activeScreen(device, fold).aspect) } } };
+}
+
+const FOLD_OPTIONS: { id: Fold; label: string }[] = [{ id: "open", label: "Раскрыт" }, { id: "book", label: "Книжкой" }, { id: "closed", label: "Сложен" }];
 
 function download(blob: Blob, name: string) {
   const url = URL.createObjectURL(blob);
@@ -64,7 +70,10 @@ export function Studio() {
   const title = "Мокап";
   const [activePreset, setActivePreset] = useState("front");
   const size = exportSize(settings.aspect, settings.resolution);
-  const distanceUnit = settings.device === "iphone15" ? 7.98 : 8.16;
+  const model = deviceModel(settings.device);
+  const distanceUnit = model.unit;
+  const presets = PRESETS.filter((preset) => !preset.phoneOnly || model.kind === "phone" || model.kind === "foldable");
+  const hasCutout = activeScreen(settings.device, settings.fold).cutout.length > 0;
 
   const showToast = useCallback((text: string, error = false) => {
     if (toastTimer.current) clearTimeout(toastTimer.current);
@@ -106,7 +115,7 @@ export function Studio() {
         if (url.startsWith("blob:")) objectURLs.current.add(url);
         decodedSize = { width: decoded.naturalWidth, height: decoded.naturalHeight };
         const nextImage = { url, name: project?.imageName ?? options?.name ?? file.name, width: decoded.naturalWidth, height: decoded.naturalHeight, demo: false };
-        mutate((current) => project ? projectDocument(project.settings, nextImage) : { ...current, image: nextImage, settings: { ...current.settings, screen: { ...current.settings.screen, fit: fitForImage(nextImage.width, nextImage.height), scale: 100, x: 0, y: 0 } } });
+        mutate((current) => project ? projectDocument(project.settings, nextImage) : { ...current, image: nextImage, settings: { ...current.settings, screen: { ...current.settings.screen, fit: fitForImage(nextImage.width, nextImage.height, activeScreen(current.settings.device, current.settings.fold).aspect), scale: 100, x: 0, y: 0 } } });
       }
       if (request === uploadRequest.current) showToast(project ? "Проект открыт" : options?.toast && decodedSize ? options.toast(decodedSize.width, decodedSize.height) : "Изображение на экране обновлено");
     } catch (error) {
@@ -124,14 +133,14 @@ export function Studio() {
     setLoadingImage(true); setCapturing(kind);
     try {
       const { width, height } = sceneRef.current?.screenSize ?? { width: 1290, height: 2796 };
-      const file = await captureLink(link, width, height);
+      const file = await captureLink(link, width, height, model.kind === "laptop" || model.kind === "display");
       if (request !== uploadRequest.current) return;
       setLinkDraft("");
       await openFile(file, { toast: (w, h) => `${kind === "figma" ? "Фрейм Figma" : "Сайт"} на экране · ${w} × ${h}` });
     } catch (error) {
       if (request === uploadRequest.current) { setLoadingImage(false); showError(error instanceof Error ? error.message : "Не удалось получить снимок по ссылке."); }
     } finally { if (request === uploadRequest.current) setCapturing(null); }
-  }, [openFile, showError]);
+  }, [model.kind, openFile, showError]);
 
   const exportPNG = useCallback(async () => {
     if (!sceneRef.current || busy || modelState.status !== "ready" || loadingImage) return;
@@ -214,15 +223,16 @@ export function Studio() {
     <div className="editor-layout">
       <section className="stage-column" aria-label="Сцена">
         <Viewport settings={settings} image={image} sceneRef={sceneRef} onCamera={onCamera} onModel={setModelState} onError={showError} modelState={modelState} navigation={navigation} onResetCamera={resetCamera} onDropFile={(file) => void openFile(file)} busy={busy}
-          topLeft={<FluidChoice label="Ракурс" value={activePreset} placeholder="Свой ракурс" icon={Camera} className="preset-choice" disabled={busy} items={PRESETS.map((preset) => ({ id: preset.id, label: preset.name }))} onChange={(id) => { const preset = PRESETS.find((item) => item.id === id); if (preset) { change("camera", { ...preset.camera }); setActivePreset(id); } }} />}
+          topLeft={<FluidChoice label="Ракурс" value={activePreset} placeholder="Свой ракурс" icon={Camera} className="preset-choice" disabled={busy} items={presets.map((preset) => ({ id: preset.id, label: preset.name }))} onChange={(id) => { const preset = presets.find((item) => item.id === id); if (preset) { change("camera", { ...preset.camera }); setActivePreset(id); } }} />}
           topRight={<div className="header-actions"><Button variant="ghost" size="icon-compact" aria-label="Отменить (Ctrl+Z)" title="Отменить · Ctrl+Z" disabled={!history.past.length || busy} onClick={() => { dispatch({ type: "undo" }); setActivePreset(""); }}><Undo2 /></Button><Button variant="ghost" size="icon-compact" aria-label="Повторить (Ctrl+Shift+Z)" title="Повторить · Ctrl+Shift+Z" disabled={!history.future.length || busy} onClick={() => dispatch({ type: "redo" })}><Redo2 /></Button><span className="toolbar-divider" /><Button variant="ghost" size="icon-compact" aria-label="Сохранить проект (Ctrl+S)" title="Сохранить проект · Ctrl+S" onClick={() => void saveProject()}><Save /></Button><ThemeToggle /><Button variant="ghost" size="icon-compact" aria-label="Горячие клавиши" title="Горячие клавиши · ?" onClick={() => helpRef.current?.showModal()}><CircleHelp /></Button></div>} />
       </section>
 
       <aside className="inspector" aria-label="Настройки мокапа">
         <fieldset className="inspector-fields" disabled={busy}>
           <div className="asset-settings">
-            <div className="property-row"><span>Модель</span><FluidChoice label="Модель телефона" value={settings.device} items={DEVICES.map((item) => ({ id: item.id, label: item.name }))} className="device-choice" onChange={(id) => { const device = id === "iphone18" ? "iphone18" : "iphone15"; mutate((current) => ({ ...current, settings: { ...current.settings, device, finish: "black" } })); }} /></div>
-            <div className="property-row"><span>Цвет</span><FluidChoice label="Цвет корпуса" value={settings.finish} items={FINISHES.filter((item) => settings.device === "iphone18" || item.id === "black").map((item) => ({ id: item.id, label: item.name, color: item.color }))} className="finish-trigger" onChange={(id) => { const selected = FINISHES.find((item) => item.id === id); if (selected) change("finish", selected.id); }} /></div>
+            <div className="property-row"><span>Модель</span><FluidChoice label="Модель устройства" value={settings.device} items={DEVICES.map((item) => ({ id: item.id, label: item.name, group: item.group }))} className="device-choice" onChange={(id) => { const selected = DEVICES.find((item) => item.id === id); if (selected) mutate((current) => withScreen(current, selected.id, current.settings.fold)); }} /></div>
+            <div className="property-row"><span>Цвет</span><FluidChoice label="Цвет корпуса" value={settings.finish} items={model.finishes.map((item) => ({ id: item.id, label: item.name, color: item.color }))} className="finish-trigger" onChange={(id) => { const selected = model.finishes.find((item) => item.id === id); if (selected) change("finish", selected.id); }} /></div>
+            {model.fold && <div className="property-row"><span>Сгиб</span><Segmented className="segmented fold-options" label="Положение шарнира" value={settings.fold} items={FOLD_OPTIONS} onChange={(fold) => mutate((current) => withScreen(current, current.settings.device, fold))} /></div>}
             <div className="section-heading screen-heading"><h2>Экран</h2>{!image.demo && <button className="quiet-icon" aria-label="Убрать изображение" title="Вернуть демо-экран" onClick={() => mutate((current) => ({ ...current, image: INITIAL_DOCUMENT.image }))}><X size={13} /></button>}</div>
             <button className={`upload-card${image.demo ? " demo-upload" : ""}`} disabled={loadingImage} onClick={() => fileRef.current?.click()} aria-label="Загрузить изображение на экран" title="Загрузить изображение или открыть проект · Ctrl+O">
               {image.demo ? <span className="upload-icon"><ImagePlus size={20} /></span> : <span className="upload-thumb"><img src={image.url} alt="Загруженное изображение" /></span>}
@@ -248,7 +258,7 @@ export function Studio() {
               <section className="control-section"><div className="section-heading"><h3>Ракурс</h3></div><Control label="Поворот" value={settings.camera.azimuth} min={-180} max={180} unit="°" onChange={(azimuth) => camera({ azimuth }, "azimuth")} /><Control label="Наклон" value={settings.camera.elevation} min={-89} max={89} unit="°" onChange={(elevation) => camera({ elevation }, "elevation")} /><Control label="Крен" value={settings.camera.roll} min={-180} max={180} unit="°" onChange={(roll) => camera({ roll }, "roll")} /></section>
               <section className="control-section"><div className="section-heading"><h3>Положение в кадре</h3></div><Control label="По горизонтали" value={settings.camera.offsetX} min={-100} max={100} unit="%" onChange={(offsetX) => camera({ offsetX }, "cameraX")} /><Control label="По вертикали" value={settings.camera.offsetY} min={-100} max={100} unit="%" onChange={(offsetY) => camera({ offsetY }, "cameraY")} /></section>
             </>}
-            {tab === "screen" && <><section className="control-section"><div className="section-heading"><h3>Размещение изображения</h3></div><Segmented label="Размещение изображения" value={settings.screen.fit} items={[{ id: "cover", label: "Заполнить" }, { id: "contain", label: "Вписать" }]} onChange={(fit) => screen({ fit })} /><Control label="Масштаб изображения" value={settings.screen.scale} min={25} max={300} unit="%" onChange={(scale) => screen({ scale }, "screenScale")} /><Control label="Сдвиг по горизонтали" value={settings.screen.x} min={-100} max={100} unit="%" onChange={(x) => screen({ x }, "screenX")} /><Control label="Сдвиг по вертикали" value={settings.screen.y} min={-100} max={100} unit="%" onChange={(y) => screen({ y }, "screenY")} /></section><section className="control-section"><div className="section-heading"><h3>Детали экрана</h3></div><label className="switch-row"><span><strong>Вырез камеры</strong><span>Выключите, если он уже на скриншоте</span></span><input type="checkbox" checked={settings.screen.island} onChange={(event) => screen({ island: event.target.checked })} /><i aria-hidden="true" /></label><Control label="Отражения на стекле" value={settings.screen.reflection} min={0} max={50} unit="%" onChange={(reflection) => screen({ reflection }, "reflection")} /></section><button className="text-button" onClick={() => change("screen", { ...DEFAULT_SETTINGS.screen })}><RotateCcw size={13} /> Сбросить настройки экрана</button></>}
+            {tab === "screen" && <><section className="control-section"><div className="section-heading"><h3>Размещение изображения</h3></div><Segmented label="Размещение изображения" value={settings.screen.fit} items={[{ id: "cover", label: "Заполнить" }, { id: "contain", label: "Вписать" }]} onChange={(fit) => screen({ fit })} /><Control label="Масштаб изображения" value={settings.screen.scale} min={25} max={300} unit="%" onChange={(scale) => screen({ scale }, "screenScale")} /><Control label="Сдвиг по горизонтали" value={settings.screen.x} min={-100} max={100} unit="%" onChange={(x) => screen({ x }, "screenX")} /><Control label="Сдвиг по вертикали" value={settings.screen.y} min={-100} max={100} unit="%" onChange={(y) => screen({ y }, "screenY")} /></section><section className="control-section"><div className="section-heading"><h3>Детали экрана</h3></div>{hasCutout && <label className="switch-row"><span><strong>Вырез камеры</strong><span>Выключите, если он уже на скриншоте</span></span><input type="checkbox" checked={settings.screen.island} onChange={(event) => screen({ island: event.target.checked })} /><i aria-hidden="true" /></label>}<Control label="Отражения на стекле" value={settings.screen.reflection} min={0} max={50} unit="%" onChange={(reflection) => screen({ reflection }, "reflection")} /></section><button className="text-button" onClick={() => change("screen", { ...DEFAULT_SETTINGS.screen })}><RotateCcw size={13} /> Сбросить настройки экрана</button></>}
             {tab === "scene" && <><section className="control-section"><div className="section-heading"><h3>Фон</h3></div><Segmented label="Тип фона" value={settings.background.mode} items={[{ id: "solid", label: "Цвет" }, { id: "gradient", label: "Градиент" }, { id: "transparent", label: "Прозрачный" }]} onChange={(mode) => background({ mode })} />
               {settings.background.mode === "transparent" ? <div className="transparency-note"><span className="checkerboard" /><span>Прозрачный фон</span></div> : <><div className="background-swatches">{["#ffffff", "#f4f4f4", "#e5e5e5", "#a3a3a3", "#737373", "#262626"].map((color) => <button key={color} style={{ background: color }} aria-label={`Фон ${color}`} aria-pressed={settings.background.color === color} onClick={() => background({ color })}>{settings.background.color === color && <Check size={13} style={{ color: color === "#262626" ? "white" : "#292929" }} />}</button>)}</div><ColorField label="Основной цвет" value={settings.background.color} onChange={(color) => background({ color }, "backgroundColor")} />{settings.background.mode === "gradient" && <><ColorField label="Второй цвет" value={settings.background.secondary} onChange={(secondary) => background({ secondary }, "backgroundSecondary")} /><Control label="Направление градиента" value={settings.background.angle} min={0} max={360} unit="°" onChange={(angle) => background({ angle }, "gradientAngle")} /></>}</>}
               </section><section className="control-section"><div className="section-heading"><h3>Свет</h3></div><Segmented label="Схема освещения" value={settings.light.preset} items={[{ id: "soft", label: "Мягкий" }, { id: "contrast", label: "Контрастный" }, { id: "rim", label: "По краям" }]} onChange={(preset) => light({ preset })} /><p className="light-description">{settings.light.preset === "soft" ? "Ровный свет без резких бликов." : settings.light.preset === "contrast" ? "Подчёркивает грани и материал корпуса." : "Подсвечивает края на тёмном фоне."}</p><Control label="Яркость" value={settings.light.intensity} min={0} max={200} unit="%" onChange={(intensity) => light({ intensity }, "lightIntensity")} /><details className="light-advanced"><summary>Дополнительно</summary><Control label="Направление света" value={settings.light.rotation} min={-180} max={180} unit="°" onChange={(rotation) => light({ rotation }, "lightRotation")} /><Control label="Экспозиция" value={settings.light.exposure} min={25} max={200} unit="%" onChange={(exposure) => light({ exposure }, "exposure")} /></details></section></>}
@@ -265,6 +275,6 @@ export function Studio() {
         exit={{ opacity: 0, y: 6, scale: 0.98, transition: spring.moderate.exit }} transition={spring.moderate}>
         <span className="toast-icon">{toast.error ? <CircleHelp size={16} /> : <Check size={16} />}</span><span>{toast.text}</span><button aria-label="Закрыть уведомление" onClick={() => setToast(null)}><X size={13} /></button></motion.div>}
     </AnimatePresence>
-    <dialog ref={helpRef} className="help-dialog"><div className="dialog-heading"><span className="dialog-icon"><Layers2 size={22} /></span><button className="icon-button" aria-label="Закрыть справку" onClick={() => helpRef.current?.close()}><X size={18} /></button></div><h2>Привычные движения.</h2><p>Всё нужное — под рукой.</p><dl className="shortcut-list">{[["Вращать телефон", "Перетаскивание / стрелки"], ["Перемещать рабочую область", "Space + drag / средняя кнопка"], ["Масштаб под курсором", "Ctrl + колёсико"], ["Рука / вращение", "H / V"], ["Уместить холст", "Shift + 1 / F"], ["Масштаб 100%", "0"], ["Отменить / повторить", "Ctrl + Z / Ctrl + Shift + Z"], ["Открыть экран или проект", "Ctrl + O"], ["Вставить картинку или ссылку", "Ctrl + V"], ["Сохранить проект", "Ctrl + S"], ["Экспорт PNG", "Ctrl + Shift + E"]].map(([name, shortcut]) => <div key={name}><dt>{name}</dt><dd>{shortcut}</dd></div>)}</dl><p className="help-note">Масштаб рабочей области не влияет на экспорт. На Mac используйте ⌘ вместо Ctrl. Все файлы обрабатываются на вашем компьютере.</p><details className="model-credits"><summary>Авторы 3D-моделей</summary><p>iPhone 15 Pro Max — polyman, CC BY 4.0. Модели iPhone 18 Pro Max — extraakash, Sketchfab Standard. Файлы предоставлены пользователем. Названия соответствуют метаданным файлов.</p></details><button className="small-button reset-project" onClick={() => { mutate(() => structuredClone(INITIAL_DOCUMENT)); setActivePreset("front"); helpRef.current?.close(); showToast("Сцена сброшена. Изменение можно отменить."); }}><RotateCcw size={14} /> Сбросить всю сцену</button></dialog>
+    <dialog ref={helpRef} className="help-dialog"><div className="dialog-heading"><span className="dialog-icon"><Layers2 size={22} /></span><button className="icon-button" aria-label="Закрыть справку" onClick={() => helpRef.current?.close()}><X size={18} /></button></div><h2>Привычные движения.</h2><p>Всё нужное — под рукой.</p><dl className="shortcut-list">{[["Вращать модель", "Перетаскивание / стрелки"], ["Перемещать рабочую область", "Space + drag / средняя кнопка"], ["Масштаб под курсором", "Ctrl + колёсико"], ["Рука / вращение", "H / V"], ["Уместить холст", "Shift + 1 / F"], ["Масштаб 100%", "0"], ["Отменить / повторить", "Ctrl + Z / Ctrl + Shift + Z"], ["Открыть экран или проект", "Ctrl + O"], ["Вставить картинку или ссылку", "Ctrl + V"], ["Сохранить проект", "Ctrl + S"], ["Экспорт PNG", "Ctrl + Shift + E"]].map(([name, shortcut]) => <div key={name}><dt>{name}</dt><dd>{shortcut}</dd></div>)}</dl><p className="help-note">Масштаб рабочей области не влияет на экспорт. На Mac используйте ⌘ вместо Ctrl. Все файлы обрабатываются на вашем компьютере.</p><details className="model-credits"><summary>Авторы 3D-моделей</summary><p>iPhone 15 Pro Max и Pro Display XDR — polyman, CC BY 4.0. iPhone 18 Pro Max и iPhone Duo — extraakash, Sketchfab Standard. Galaxy S26 Ultra — gadirovsaid7, CC BY 4.0. MacBook Pro 14″ — Apple User, Sketchfab Standard. Файлы предоставлены пользователем. Названия моделей соответствуют метаданным файлов.</p></details><button className="small-button reset-project" onClick={() => { mutate(() => structuredClone(INITIAL_DOCUMENT)); setActivePreset("front"); helpRef.current?.close(); showToast("Сцена сброшена. Изменение можно отменить."); }}><RotateCcw size={14} /> Сбросить всю сцену</button></dialog>
   </main></MotionConfig>;
 }
