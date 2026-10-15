@@ -24,7 +24,7 @@ export function FluidChoice({ label, value, items, onChange, disabled, placehold
             {/* Линия между группами: без неё подписи теряются и непонятно,
                 где кончается iPhone и начинается Android. */}
             {index > 0 && <SelectSeparator />}
-            <SelectGroup aria-label={group}><SelectLabel>{group}</SelectLabel>{items.filter((item) => item.group === group).map(row)}</SelectGroup>
+            <SelectGroup aria-label={group}><SelectLabel className="choice-label" aria-hidden="true">{group}</SelectLabel>{items.filter((item) => item.group === group).map(row)}</SelectGroup>
           </Fragment>)
         : items.map(row)}
     </SelectContent>
