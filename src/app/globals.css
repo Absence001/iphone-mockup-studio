@@ -350,6 +350,23 @@ svg { flex-shrink: 0; }
   .device-choice:hover:not(:disabled), .finish-trigger:hover:not(:disabled) { background: var(--panel-hover); border-color: var(--border); }
   .select-wrap:hover { background: var(--hover); }
 }
+/* === Видео и галерея фонов =============================================== */
+.video-transport { display: flex; align-items: center; gap: var(--space-md); margin-block-end: var(--space-md); }
+.video-transport .icon-button { background: var(--panel-raised); flex-shrink: 0; }
+.video-range { color: var(--fg-muted); font-size: var(--fs-micro); font-variant-numeric: tabular-nums; }
+/* Миниатюры фонов: шесть в ряд при ширине панели 312px. */
+.background-gallery { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; margin-block-end: var(--space-md); }
+.background-gallery button { aspect-ratio: 1; border-radius: var(--radius-sm); display: grid; place-items: center; color: #fff; box-shadow: inset 0 0 0 1px var(--swatch-ring); outline: 1px solid transparent; outline-offset: 2px; transition: transform var(--dur-moderate) var(--ease-out), outline-color var(--dur-fast) ease; }
+.background-gallery button[aria-pressed="true"] { outline-color: var(--focus-ring); }
+.background-gallery button svg { filter: drop-shadow(0 1px 2px rgb(0 0 0 / 0.45)); }
+.export-format { margin-block-end: var(--space-md); }
+/* Загрузка своего фона — постоянный блок секции, отделён от настроек режима. */
+.backdrop-slot { margin-block-start: var(--space-lg); padding-block-start: var(--space-lg); border-top: 1px solid var(--line-subtle); }
+.backdrop-slot .text-button { margin-block-start: var(--space-sm); }
+@media (hover: hover) and (pointer: fine) {
+  .background-gallery button:hover { transform: scale(1.08); }
+  .video-transport .icon-button:hover { background: var(--panel-hover); }
+}
 @media (max-width: 800px) {
   .studio-shell { height: auto; min-height: 100dvh; overflow: visible; }
   .editor-layout { height: auto; grid-template-columns: 1fr; }
