@@ -1,12 +1,13 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { deviceFinish, deviceModel, finishScreens, type DeviceModel, type ScreenConfig } from "./models";
 import { SpecularGlossinessPlugin } from "./spec-gloss";
 import { recolor } from "./recolor";
 import { FOLD_OPEN, FOLD_OUTER_BELOW, clamp, videoEnd, type CameraSettings, type Settings } from "./settings";
 import { backgroundPreset, paintBackground } from "./backgrounds";
+import { StudioLight, shadowDirection } from "./studio-light";
+import { BackdropShadow, type ShadowOptions } from "./shadow";
 
 type LoadState = { status: "loading" | "ready" | "error"; message?: string };
 type Callbacks = {
@@ -37,6 +38,18 @@ function recorderMime(): string | null {
 /** Умеет ли браузер записывать экспорт в видео. */
 export function canExportVideo(): boolean {
   return recorderMime() !== null && typeof HTMLCanvasElement.prototype.captureStream === "function";
+}
+
+/**
+ * Цвет тени берётся от фона: на цветном фоне настоящая тень — тёмный оттенок
+ * того же цвета, а не серое пятно. На прозрачном и своём фоне тень чёрная.
+ */
+function shadowColor(background: Settings["background"]): THREE.Color {
+  const color = background.mode === "solid" ? new THREE.Color(background.color)
+    : background.mode === "gradient" ? new THREE.Color(background.color).lerp(new THREE.Color(background.secondary), 0.5)
+    : background.mode === "preset" ? new THREE.Color(backgroundPreset(background.preset).base)
+    : new THREE.Color(0x000000);
+  return color.multiplyScalar(0.12);
 }
 
 function disposeObject(object: THREE.Object3D) {
@@ -185,14 +198,13 @@ export class StudioScene {
   private readonly orthographic = new THREE.OrthographicCamera(-2, 2, 1.5, -1.5, 0.01, 100);
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = this.perspective;
   private readonly device = new THREE.Group();
-  private readonly lightRig = new THREE.Group();
-  private readonly key = new THREE.DirectionalLight(0xfff8ed, 3);
-  private readonly fill = new THREE.DirectionalLight(0xdde6ff, 2);
-  private readonly rim = new THREE.DirectionalLight(0xffffff, 4);
-  private readonly ambient = new THREE.HemisphereLight(0xffffff, 0x424047, 1.2);
+  /** Устройство в координатах группы device: по нему ставится тень на фоне. */
+  private bounds: THREE.Box3 | null = null;
+  private readonly shadow = new BackdropShadow();
+  private shadowOptions: ShadowOptions | null = null;
   private readonly controls: OrbitControls;
   private readonly observer: ResizeObserver;
-  private readonly environment: THREE.WebGLRenderTarget;
+  private readonly studio: StudioLight;
   private readonly screenCanvas = document.createElement("canvas");
   private readonly screenTexture: THREE.CanvasTexture;
   private readonly screenMaterial: THREE.MeshBasicMaterial;
@@ -240,24 +252,16 @@ export class StudioScene {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true, powerPreference: "high-performance" });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    // Нейтральная кривая Khronos сделана для предметных рендеров: она сохраняет
+    // цвет корпуса и не давит тени, как ACES.
+    this.renderer.toneMapping = THREE.NeutralToneMapping;
     this.renderer.setClearColor(0x000000, 0);
     this.renderer.domElement.setAttribute("aria-label", "3D-превью устройства. Перетаскивайте для вращения, удерживайте Space для перемещения рабочей области.");
     this.renderer.domElement.setAttribute("role", "img");
     this.renderer.domElement.addEventListener("webglcontextlost", this.handleContextLost);
     this.host.appendChild(this.renderer.domElement);
-    const room = new RoomEnvironment();
-    const pmrem = new THREE.PMREMGenerator(this.renderer);
-    this.environment = pmrem.fromScene(room, 0.04);
-    this.scene.environment = this.environment.texture;
-    room.dispose();
-    pmrem.dispose();
-    this.scene.add(this.device);
-    this.key.position.set(-3, 4, 5);
-    this.fill.position.set(4, 1, 3);
-    this.rim.position.set(-2, 2, -4);
-    this.lightRig.add(this.key, this.fill, this.rim);
-    this.scene.add(this.lightRig, this.ambient);
+    this.studio = new StudioLight(this.renderer);
+    this.scene.add(this.device, this.shadow.plane);
     this.presetCanvas.width = 512;
     this.presetCanvas.height = 512;
     this.screenCanvas.width = 1290;
@@ -320,10 +324,16 @@ export class StudioScene {
     this.controls.update();
     this.advance();
     if (this.needsRender || this.interacting) {
-      this.renderer.render(this.scene, this.camera);
+      this.draw();
       this.needsRender = false;
     }
   };
+
+  /** Кадр целиком: сначала тень под текущий ракурс, затем сцена. */
+  private draw() {
+    this.shadow.update(this.renderer, this.scene, this.device, this.bounds, this.camera, this.shadowOptions);
+    this.renderer.render(this.scene, this.camera);
+  }
 
   /**
    * Движение между кадрами: орбиты пятен фона и текущий кадр видео. Шаг
@@ -472,17 +482,17 @@ export class StudioScene {
   }
 
   private applyEnvironment() {
-    const { light, background, screen } = this.settings;
-    const strength = light.intensity / 100;
-    const powers = light.preset === "contrast" ? [4.5, 0.35, 3, 0.45] : light.preset === "rim" ? [1, 0.7, 7, 0.5] : [3, 2, 4, 1.2];
-    this.key.intensity = powers[0] * strength;
-    this.fill.intensity = powers[1] * strength;
-    this.rim.intensity = powers[2] * strength;
-    this.ambient.intensity = powers[3] * strength;
-    this.scene.environmentIntensity = (light.preset === "soft" ? 1.8 : 0.9) * strength;
-    this.lightRig.rotation.y = THREE.MathUtils.degToRad(light.rotation);
-    this.scene.environmentRotation.y = THREE.MathUtils.degToRad(light.rotation);
+    const { light, background, screen, shadow } = this.settings;
+    // Весь свет — софтбоксы в карте окружения; поворот вращает их вокруг устройства.
+    const rotation = THREE.MathUtils.degToRad(light.rotation);
+    this.scene.environment = this.studio.environment(light.preset);
+    this.scene.environmentIntensity = light.intensity / 100;
+    this.scene.environmentRotation.y = rotation;
     this.renderer.toneMappingExposure = light.exposure / 100;
+    this.shadowOptions = shadow.enabled ? {
+      opacity: shadow.opacity / 100, softness: shadow.softness / 100, distance: shadow.distance / 100,
+      color: shadowColor(background), from: shadowDirection(light.preset).applyAxisAngle(new THREE.Vector3(0, 1, 0), rotation),
+    } : null;
     this.backgroundTexture?.dispose();
     this.backgroundTexture = null;
     this.backgroundAnimated = background.mode === "preset" && background.animated && !this.calm;
@@ -531,7 +541,7 @@ export class StudioScene {
     this.settings = structuredClone(next);
     if (JSON.stringify(old.camera) !== JSON.stringify(next.camera)) this.applyCamera();
     if (JSON.stringify(old.screen) !== JSON.stringify(next.screen)) this.drawScreen();
-    if (JSON.stringify([old.light, old.background, old.screen.island, old.screen.reflection]) !== JSON.stringify([next.light, next.background, next.screen.island, next.screen.reflection])) this.applyEnvironment();
+    if (JSON.stringify([old.light, old.shadow, old.background, old.screen.island, old.screen.reflection]) !== JSON.stringify([next.light, next.shadow, next.background, next.screen.island, next.screen.reflection])) this.applyEnvironment();
     if (JSON.stringify(old.video) !== JSON.stringify(next.video)) this.applyVideo();
     if (old.device !== next.device || old.finish !== next.finish) void this.loadModel();
     else if (old.fold !== next.fold || old.lid !== next.lid) this.applyPose();
@@ -793,6 +803,8 @@ export class StudioScene {
     this.model.traverse((object) => { if (object instanceof THREE.SkinnedMesh) object.computeBoundingBox(); });
     const center = new THREE.Box3().setFromObject(this.model).getCenter(new THREE.Vector3());
     this.normalized.position.copy(center).negate();
+    this.model.updateMatrixWorld(true);
+    this.bounds = new THREE.Box3().setFromObject(this.model);
     parent?.add(this.model);
     this.needsRender = true;
     // Крышка двигается ползунком: экран и свет перерисовываются только при
@@ -893,7 +905,7 @@ export class StudioScene {
       this.renderer.setPixelRatio(1);
       this.renderer.setSize(width, height, false);
       this.updateProjection(width, height);
-      this.renderer.render(this.scene, this.camera);
+      this.draw();
       return await new Promise<Blob>((resolve, reject) => {
         this.renderer.domElement.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Не удалось создать PNG. Выберите меньшее разрешение.")), "image/png");
       });
@@ -934,7 +946,7 @@ export class StudioScene {
       video.playbackRate = clamp(this.settings.video.speed / 100, 0.25, 4);
       await seek(video, start);
       this.drawScreen();
-      this.renderer.render(this.scene, this.camera);
+      this.draw();
       const stream = this.renderer.domElement.captureStream(fps);
       const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: Math.round(width * height * fps * 0.14) });
       const chunks: Blob[] = [];
@@ -950,7 +962,7 @@ export class StudioScene {
             this.backgroundSeconds += (1 / fps) * (this.settings.background.speed / 100);
             this.paintPreset();
           }
-          this.renderer.render(this.scene, this.camera);
+          this.draw();
           onProgress?.(clamp((video.currentTime - start) / Math.max(0.001, end - start), 0, 1));
           if (video.ended || video.currentTime >= end - 0.02) { resolve(); return; }
           requestAnimationFrame(step);
@@ -984,7 +996,7 @@ export class StudioScene {
     if (this.model) disposeObject(this.model);
     this.screenMaterial.dispose(); this.offMaterial.dispose(); this.screenTexture.dispose();
     this.releaseVideo(); this.releaseBackdrop();
-    this.backgroundTexture?.dispose(); this.presetTexture?.dispose(); this.environment.dispose();
+    this.backgroundTexture?.dispose(); this.presetTexture?.dispose(); this.studio.dispose(); this.shadow.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }

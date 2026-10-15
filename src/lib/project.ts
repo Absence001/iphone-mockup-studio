@@ -60,7 +60,14 @@ export function parseProject(text: string): {
       animated: typeof bg.animated === "boolean" ? bg.animated : DEFAULT_SETTINGS.background.animated,
       speed: bg.speed === undefined ? DEFAULT_SETTINGS.background.speed : number(bg, "speed", 10, 300),
     },
-    light: { preset: option(light.preset, ["soft", "contrast", "rim"]), intensity: number(light, "intensity", 0, 200), exposure: number(light, "exposure", 25, 200), rotation: number(light, "rotation", -180, 180) },
+    // Схема «contrast» до студийного света стала «studio».
+    light: { preset: option(light.preset === "contrast" ? "studio" : light.preset, ["soft", "studio", "rim"]), intensity: number(light, "intensity", 0, 200), exposure: number(light, "exposure", 25, 200), rotation: number(light, "rotation", -180, 180) },
+    // Проекты до появления тени сохранялись без этого блока.
+    shadow: s.shadow === undefined ? { ...DEFAULT_SETTINGS.shadow } : (() => {
+      const shadow = record(s.shadow);
+      if (typeof shadow.enabled !== "boolean") throw new Error("В проекте неверная настройка тени.");
+      return { enabled: shadow.enabled, opacity: number(shadow, "opacity", 0, 100), softness: number(shadow, "softness", 0, 100), distance: number(shadow, "distance", 0, 100) };
+    })(),
     // Проекты до появления видео сохранялись без этого блока.
     video: s.video === undefined ? { ...DEFAULT_SETTINGS.video } : (() => {
       const v = record(s.video);

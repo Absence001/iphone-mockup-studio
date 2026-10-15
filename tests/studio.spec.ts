@@ -45,6 +45,11 @@ test("история объединяет жест и сохраняет вет�
   // Проект до появления крышки ноутбука открывается с крышкой как в файле модели.
   expect(old.settings.lid).toBe(110);
   expect(() => parseProject(JSON.stringify({ app: "forma", version: 1, settings: { ...legacy, lid: 200 }, imageData: null }))).toThrow();
+  // Проект до студийного света: «contrast» становится «studio», тень берётся по умолчанию.
+  const { shadow: _shadow, ...unshaded } = INITIAL_HISTORY.present.settings;
+  const lit = parseProject(JSON.stringify({ app: "forma", version: 1, settings: { ...unshaded, light: { ...unshaded.light, preset: "contrast" } }, imageData: null }));
+  expect(lit.settings.light.preset).toBe("studio"); expect(lit.settings.shadow).toEqual(INITIAL_HISTORY.present.settings.shadow);
+  expect(() => parseProject(JSON.stringify({ app: "forma", version: 1, settings: { ...unshaded, shadow: { enabled: true, opacity: 500, softness: 50, distance: 30 } }, imageData: null }))).toThrow();
 });
 
 test("прямой ракурс по умолчанию, темы без ошибок React и независимый PNG", async ({ page }) => {
@@ -312,12 +317,20 @@ test("минимальный интерфейс, понятный свет и с
   await expect(page.getByRole("spinbutton", { name: "Экспозиция", exact: true })).not.toBeVisible();
   await page.getByLabel("Разрешение", { exact: true }).selectOption("1200");
   const soft = await exportPNG(page);
-  await page.getByRole("button", { name: "По краям", exact: true }).click();
-  await expect(page.getByText("Подсвечивает края на тёмном фоне.")).toBeVisible();
+  await page.getByRole("button", { name: "Контровой", exact: true }).click();
+  await expect(page.getByText("Полосы света сзади рисуют контур на тёмном фоне.")).toBeVisible();
   const rim = await exportPNG(page);
   expect(createHash("sha256").update(rim).digest("hex")).not.toBe(createHash("sha256").update(soft).digest("hex"));
   await page.keyboard.press("Control+z");
   await expect(page.getByRole("button", { name: "Мягкий", exact: true })).toHaveAttribute("aria-pressed", "true");
+  // Тень по умолчанию включена; выключенная убирает ползунки и меняет кадр.
+  await expect(page.getByRole("spinbutton", { name: "Плотность тени", exact: true })).toBeVisible();
+  await page.getByText("Тень на фоне", { exact: true }).click();
+  await expect(page.getByRole("spinbutton", { name: "Плотность тени", exact: true })).toHaveCount(0);
+  const flat = await exportPNG(page);
+  expect(createHash("sha256").update(flat).digest("hex")).not.toBe(createHash("sha256").update(soft).digest("hex"));
+  await page.keyboard.press("Control+z");
+  await expect(page.getByRole("spinbutton", { name: "Плотность тени", exact: true })).toBeVisible();
   await page.locator(".light-advanced summary").click();
   await expect(page.getByRole("spinbutton", { name: "Экспозиция", exact: true })).toBeVisible();
   await page.locator(".light-advanced summary").click();
