@@ -290,6 +290,11 @@ export class StudioScene {
     this.needsRender = true;
   }
 
+  /** Размер текстуры экрана в пикселях: под него снимаются сайты и фреймы Figma. */
+  get screenSize() {
+    return { width: this.screenCanvas.width, height: this.screenCanvas.height };
+  }
+
   /** Возвращает экран к пустому состоянию. */
   clearImage() {
     this.imageRequest++;

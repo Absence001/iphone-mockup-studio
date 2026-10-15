@@ -128,6 +128,16 @@ svg { flex-shrink: 0; }
 .upload-card > svg { color: var(--fg-muted); }
 .upload-thumb { height: 29px; width: 23px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
 .upload-thumb img { height: 100%; max-width: 100%; object-fit: contain; border-radius: 2px; outline: 1px solid var(--ring-inset); outline-offset: -1px; }
+.link-field { display: flex; align-items: center; gap: var(--space-sm); margin-block-start: var(--space-sm); padding: 3px 3px 3px 10px; min-height: 32px; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-3); transition: border-color var(--dur-fast) ease, box-shadow var(--dur-fast) ease; }
+.link-field > svg { color: var(--fg-muted); flex-shrink: 0; stroke-width: 1.75; }
+.link-field input { flex: 1; border: 0; background: transparent; padding: 0; font-size: var(--fs-body-compact); text-overflow: ellipsis; }
+.link-field input::placeholder { color: var(--fg-muted); opacity: 1; }
+.link-field input:focus-visible { outline: none; }
+.link-field:focus-within { border-color: var(--focus-ring); box-shadow: 0 0 0 2px color-mix(in oklab, var(--focus-ring) 22%, transparent); }
+.link-field button { width: 24px; height: 24px; flex-shrink: 0; }
+.link-field button:disabled { cursor: default; }
+.link-field button:disabled > svg { opacity: 0.4; }
+.link-field .spinner { width: 12px; height: 12px; }
 .quiet-icon { display: inline-flex; align-items: center; justify-content: center; color: var(--fg-muted); width: 22px; height: 20px; border-radius: 3px; }
 .inspector-tabs { flex-shrink: 0; width: calc(100% - 24px); padding: 4px !important; margin: 0 12px 0 !important; }
 .inspector-tabs > button { flex: 1; justify-content: center; }

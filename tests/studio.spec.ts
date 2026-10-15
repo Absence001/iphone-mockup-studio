@@ -230,3 +230,45 @@ test("минимальный интерфейс, понятный свет и с
   await page.getByRole("tab", { name: "Камера", exact: true }).click();
   await page.screenshot({ path: "artifacts/previews/studio.png" });
 });
+
+test("вставка из буфера обмена и по ссылке на сайт или фрейм Figma", async ({ page }) => {
+  const requests: { url: string; width: number; height: number }[] = [];
+  let reply: { status: number; body: Buffer | string; contentType: string } = { status: 200, body: testImage(), contentType: "image/png" };
+  await page.route("**/api/capture", async (route) => {
+    requests.push(route.request().postDataJSON());
+    await route.fulfill({ status: reply.status, contentType: reply.contentType, headers: { "X-Capture-Name": "example.com" }, body: reply.body });
+  });
+  await start(page);
+  const card = page.getByRole("button", { name: "Загрузить изображение на экран", exact: true });
+  const field = page.getByRole("textbox", { name: "Ссылка на сайт или фрейм Figma", exact: true });
+
+  // Адрес без протокола дополняется https://, а снимок запрашивается ровно в размер текстуры экрана.
+  await field.fill("example.com"); await field.press("Enter");
+  await expect(page.locator('.toast[role="status"]')).toContainText("Сайт на экране");
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toMatchObject({ url: "https://example.com/", width: 1290 });
+  expect(requests[0].height).toBeGreaterThan(2700); expect(requests[0].height).toBeLessThan(2900);
+  await expect(card).toContainText("example.com.png");
+  await expect(field).toHaveValue("");
+
+  const paste = (payload: { image?: number[]; text?: string; html?: string }) => page.evaluate(({ image, text, html }) => {
+    const data = new DataTransfer();
+    if (image) data.items.add(new File([new Uint8Array(image)], "image.png", { type: "image/png" }));
+    if (text) data.setData("text/plain", text);
+    if (html) data.setData("text/html", html);
+    document.body.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+  }, payload);
+
+  await paste({ image: [...testImage()] });
+  await expect(card).toContainText("Из буфера обмена");
+  await page.keyboard.press("Control+z"); await expect(card).toContainText("example.com.png");
+
+  await paste({ html: '<meta charset="utf-8"><span data-metadata="<!--(figmeta)eyJ9(/figmeta)-->"></span>' });
+  await expect(page.locator('.toast[role="alert"]')).toContainText("Copy as PNG");
+
+  reply = { status: 400, contentType: "application/json", body: JSON.stringify({ error: "Сайт ответил ошибкой 404." }) };
+  await paste({ text: "https://www.figma.com/design/abc/Test?node-id=1-2" });
+  await expect(page.locator('.toast[role="alert"]')).toContainText("Сайт ответил ошибкой 404.");
+  expect(requests.at(-1)?.url).toBe("https://www.figma.com/design/abc/Test?node-id=1-2");
+  await expect(card).toContainText("example.com.png");
+});
