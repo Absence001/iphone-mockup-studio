@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import { ArrowDownToLine, Camera, Check, ChevronDown, CircleHelp, ImagePlus, Layers2, Redo2, RotateCcw, Save, SlidersHorizontal, Sun, Undo2, Upload, X } from "lucide-react";
+import { ArrowDownToLine, ArrowRight, Camera, Check, ChevronDown, CircleHelp, ImagePlus, Layers2, Link2, Redo2, RotateCcw, Save, SlidersHorizontal, Sun, Undo2, Upload, X } from "lucide-react";
 import { AnimatePresence, MotionConfig, motion } from "motion/react";
 import { Button } from "./ui/button";
 import { TabsSubtle, TabsSubtleItem } from "./ui/tabs-subtle";
@@ -13,6 +13,7 @@ import { DEFAULT_CAMERA, DEFAULT_SETTINGS, PRESETS, clamp, exportSize, type Aspe
 import { DEVICES, FINISHES } from "@/lib/models";
 import { INITIAL_DOCUMENT, INITIAL_HISTORY, historyReducer, type DocumentState } from "@/lib/history";
 import { parseProject, projectDocument, serializeProject } from "@/lib/project";
+import { captureLink, isFigmaClipboard, isFigmaLink, normalizeLink } from "@/lib/capture";
 import { spring } from "@/lib/springs";
 import type { StudioScene } from "@/lib/scene";
 
@@ -56,6 +57,8 @@ export function Studio() {
   const [modelState, setModelState] = useState<ModelState>({ status: "loading" });
   const [busy, setBusy] = useState(false);
   const [loadingImage, setLoadingImage] = useState(false);
+  const [capturing, setCapturing] = useState<"site" | "figma" | null>(null);
+  const [linkDraft, setLinkDraft] = useState("");
   const [toast, setToast] = useState<{ text: string; error: boolean } | null>(null);
   const [navigation, setNavigation] = useState<NavigationCommand | null>(null);
   const title = "Мокап";
@@ -81,11 +84,13 @@ export function Studio() {
 
   useEffect(() => () => { objectURLs.current.forEach((url) => URL.revokeObjectURL(url)); if (toastTimer.current) clearTimeout(toastTimer.current); }, []);
 
-  const openFile = useCallback(async (file: File) => {
+  const openFile = useCallback(async (file: File, options?: { name?: string; toast?: (width: number, height: number) => string }) => {
     const request = ++uploadRequest.current;
+    setCapturing(null);
     if (file.size > 32 * 1024 * 1024) { showError("Файл больше 32 МБ. Выберите изображение или проект меньшего размера."); return; }
     setLoadingImage(true);
     let url: string | null = null;
+    let decodedSize: { width: number; height: number } | null = null;
     try {
       let project: ReturnType<typeof parseProject> | null = null;
       if (file.name.toLowerCase().endsWith(".json")) project = parseProject(await file.text());
@@ -99,15 +104,34 @@ export function Studio() {
         if (decoded.naturalWidth > 20000 || decoded.naturalHeight > 20000) throw new Error("Изображение слишком большое. Уменьшите его до 20 000 пикселей по стороне.");
         if (request !== uploadRequest.current) { if (url.startsWith("blob:")) URL.revokeObjectURL(url); return; }
         if (url.startsWith("blob:")) objectURLs.current.add(url);
-        const nextImage = { url, name: project?.imageName ?? file.name, width: decoded.naturalWidth, height: decoded.naturalHeight, demo: false };
+        decodedSize = { width: decoded.naturalWidth, height: decoded.naturalHeight };
+        const nextImage = { url, name: project?.imageName ?? options?.name ?? file.name, width: decoded.naturalWidth, height: decoded.naturalHeight, demo: false };
         mutate((current) => project ? projectDocument(project.settings, nextImage) : { ...current, image: nextImage, settings: { ...current.settings, screen: { ...current.settings.screen, fit: fitForImage(nextImage.width, nextImage.height), scale: 100, x: 0, y: 0 } } });
       }
-      if (request === uploadRequest.current) showToast(project ? "Проект открыт" : "Изображение на экране обновлено");
+      if (request === uploadRequest.current) showToast(project ? "Проект открыт" : options?.toast && decodedSize ? options.toast(decodedSize.width, decodedSize.height) : "Изображение на экране обновлено");
     } catch (error) {
       if (url?.startsWith("blob:")) URL.revokeObjectURL(url);
       if (request === uploadRequest.current) showError(error instanceof Error ? error.message : "Не удалось открыть файл.");
     } finally { if (request === uploadRequest.current) setLoadingImage(false); }
   }, [mutate, showError, showToast]);
+
+  /** Снимает сайт или фрейм Figma в размер текстуры экрана текущей модели. */
+  const openLink = useCallback(async (text: string) => {
+    const link = normalizeLink(text);
+    if (!link) { showError("Это не похоже на ссылку. Вставьте адрес вида https://example.com."); return; }
+    const request = ++uploadRequest.current;
+    const kind = isFigmaLink(link) ? "figma" : "site";
+    setLoadingImage(true); setCapturing(kind);
+    try {
+      const { width, height } = sceneRef.current?.screenSize ?? { width: 1290, height: 2796 };
+      const file = await captureLink(link, width, height);
+      if (request !== uploadRequest.current) return;
+      setLinkDraft("");
+      await openFile(file, { toast: (w, h) => `${kind === "figma" ? "Фрейм Figma" : "Сайт"} на экране · ${w} × ${h}` });
+    } catch (error) {
+      if (request === uploadRequest.current) { setLoadingImage(false); showError(error instanceof Error ? error.message : "Не удалось получить снимок по ссылке."); }
+    } finally { if (request === uploadRequest.current) setCapturing(null); }
+  }, [openFile, showError]);
 
   const exportPNG = useCallback(async () => {
     if (!sceneRef.current || busy || modelState.status !== "ready" || loadingImage) return;
@@ -163,6 +187,25 @@ export function Studio() {
     return () => window.removeEventListener("keydown", handleKey);
   }, [busy, camera, exportPNG, navigate, saveProject, settings.camera]);
 
+  useEffect(() => {
+    const handlePaste = (event: ClipboardEvent) => {
+      const data = event.clipboardData;
+      if (!data || busy || helpRef.current?.open) return;
+      const image = Array.from(data.files).find((file) => ["image/png", "image/jpeg", "image/webp"].includes(file.type));
+      if (image) { event.preventDefault(); void openFile(image, { name: image.name === "image.png" ? "Из буфера обмена" : image.name }); return; }
+      // В текстовых полях вставка работает как обычно.
+      if (event.target instanceof HTMLElement && event.target.closest('input:not([type="range"]):not([type="checkbox"]):not([type="file"]):not([type="color"]), textarea, [contenteditable=true]')) return;
+      const link = normalizeLink(data.getData("text/plain"));
+      if (link) { event.preventDefault(); void openLink(link); return; }
+      if (isFigmaClipboard(data.getData("text/html"))) {
+        event.preventDefault();
+        showError("Figma скопировала фрейм как слой, а не как картинку. Выделите фрейм, нажмите Shift+⌘+C (Copy as PNG) и вставьте снова — или вставьте ссылку на фрейм.");
+      }
+    };
+    window.addEventListener("paste", handlePaste);
+    return () => window.removeEventListener("paste", handlePaste);
+  }, [busy, openFile, openLink, showError]);
+
   const screen = (patch: Partial<Settings["screen"]>, group?: string) => change("screen", { ...settings.screen, ...patch }, group);
   const light = (patch: Partial<Settings["light"]>, group?: string) => change("light", { ...settings.light, ...patch }, group);
   const background = (patch: Partial<Settings["background"]>, group?: string) => change("background", { ...settings.background, ...patch }, group);
@@ -183,9 +226,14 @@ export function Studio() {
             <div className="section-heading screen-heading"><h2>Экран</h2>{!image.demo && <button className="quiet-icon" aria-label="Убрать изображение" title="Вернуть демо-экран" onClick={() => mutate((current) => ({ ...current, image: INITIAL_DOCUMENT.image }))}><X size={13} /></button>}</div>
             <button className={`upload-card${image.demo ? " demo-upload" : ""}`} disabled={loadingImage} onClick={() => fileRef.current?.click()} aria-label="Загрузить изображение на экран" title="Загрузить изображение или открыть проект · Ctrl+O">
               {image.demo ? <span className="upload-icon"><ImagePlus size={20} /></span> : <span className="upload-thumb"><img src={image.url} alt="Загруженное изображение" /></span>}
-              <span className="upload-copy"><strong>{loadingImage ? "Загружаем…" : image.demo ? "Загрузить изображение" : image.name}</strong>{!image.demo && <span>{image.width} × {image.height}</span>}</span><Upload size={14} />
+              <span className="upload-copy"><strong>{capturing === "site" ? "Снимаем сайт…" : capturing === "figma" ? "Загружаем фрейм из Figma…" : loadingImage ? "Загружаем…" : image.demo ? "Загрузить изображение" : image.name}</strong><span>{capturing ? "Обычно несколько секунд" : image.demo ? "PNG, JPG, WebP или вставьте · Ctrl+V" : `${image.width} × ${image.height}`}</span></span><Upload size={14} />
             </button>
             <input ref={fileRef} type="file" accept="image/png,image/jpeg,image/webp,.json" className="sr-only" tabIndex={-1} aria-label="Файл изображения или проекта" onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void openFile(file); }} />
+            <form className="link-field" onSubmit={(event) => { event.preventDefault(); void openLink(linkDraft); }}>
+              <Link2 size={14} aria-hidden="true" />
+              <input type="text" inputMode="url" value={linkDraft} onChange={(event) => setLinkDraft(event.target.value)} placeholder="Ссылка на сайт или фрейм Figma" aria-label="Ссылка на сайт или фрейм Figma" title="Снимок встанет в разрешении экрана телефона" spellCheck={false} autoComplete="off" disabled={loadingImage} />
+              <button type="submit" className="quiet-icon" aria-label="Вставить по ссылке" title="Вставить по ссылке · Enter" disabled={!linkDraft.trim() || loadingImage}>{capturing ? <span className="spinner" /> : <ArrowRight size={13} />}</button>
+            </form>
           </div>
 
           <TabsSubtle className="inspector-tabs" size="compact" selectedIndex={["camera", "screen", "scene"].indexOf(tab)} onSelect={(index) => setTab((["camera", "screen", "scene"] as const)[index])} idPrefix="inspector" aria-label="Разделы настроек"><TabsSubtleItem index={0} icon={Camera} label="Камера" /><TabsSubtleItem index={1} icon={SlidersHorizontal} label="Экран" /><TabsSubtleItem index={2} icon={Sun} label="Сцена" /></TabsSubtle>
@@ -217,6 +265,6 @@ export function Studio() {
         exit={{ opacity: 0, y: 6, scale: 0.98, transition: spring.moderate.exit }} transition={spring.moderate}>
         <span className="toast-icon">{toast.error ? <CircleHelp size={16} /> : <Check size={16} />}</span><span>{toast.text}</span><button aria-label="Закрыть уведомление" onClick={() => setToast(null)}><X size={13} /></button></motion.div>}
     </AnimatePresence>
-    <dialog ref={helpRef} className="help-dialog"><div className="dialog-heading"><span className="dialog-icon"><Layers2 size={22} /></span><button className="icon-button" aria-label="Закрыть справку" onClick={() => helpRef.current?.close()}><X size={18} /></button></div><h2>Привычные движения.</h2><p>Всё нужное — под рукой.</p><dl className="shortcut-list">{[["Вращать телефон", "Перетаскивание / стрелки"], ["Перемещать рабочую область", "Space + drag / средняя кнопка"], ["Масштаб под курсором", "Ctrl + колёсико"], ["Рука / вращение", "H / V"], ["Уместить холст", "Shift + 1 / F"], ["Масштаб 100%", "0"], ["Отменить / повторить", "Ctrl + Z / Ctrl + Shift + Z"], ["Открыть экран или проект", "Ctrl + O"], ["Сохранить проект", "Ctrl + S"], ["Экспорт PNG", "Ctrl + Shift + E"]].map(([name, shortcut]) => <div key={name}><dt>{name}</dt><dd>{shortcut}</dd></div>)}</dl><p className="help-note">Масштаб рабочей области не влияет на экспорт. На Mac используйте ⌘ вместо Ctrl. Все файлы обрабатываются на вашем компьютере.</p><details className="model-credits"><summary>Авторы 3D-моделей</summary><p>iPhone 15 Pro Max — polyman, CC BY 4.0. Модели iPhone 18 Pro Max — extraakash, Sketchfab Standard. Файлы предоставлены пользователем. Названия соответствуют метаданным файлов.</p></details><button className="small-button reset-project" onClick={() => { mutate(() => structuredClone(INITIAL_DOCUMENT)); setActivePreset("front"); helpRef.current?.close(); showToast("Сцена сброшена. Изменение можно отменить."); }}><RotateCcw size={14} /> Сбросить всю сцену</button></dialog>
+    <dialog ref={helpRef} className="help-dialog"><div className="dialog-heading"><span className="dialog-icon"><Layers2 size={22} /></span><button className="icon-button" aria-label="Закрыть справку" onClick={() => helpRef.current?.close()}><X size={18} /></button></div><h2>Привычные движения.</h2><p>Всё нужное — под рукой.</p><dl className="shortcut-list">{[["Вращать телефон", "Перетаскивание / стрелки"], ["Перемещать рабочую область", "Space + drag / средняя кнопка"], ["Масштаб под курсором", "Ctrl + колёсико"], ["Рука / вращение", "H / V"], ["Уместить холст", "Shift + 1 / F"], ["Масштаб 100%", "0"], ["Отменить / повторить", "Ctrl + Z / Ctrl + Shift + Z"], ["Открыть экран или проект", "Ctrl + O"], ["Вставить картинку или ссылку", "Ctrl + V"], ["Сохранить проект", "Ctrl + S"], ["Экспорт PNG", "Ctrl + Shift + E"]].map(([name, shortcut]) => <div key={name}><dt>{name}</dt><dd>{shortcut}</dd></div>)}</dl><p className="help-note">Масштаб рабочей области не влияет на экспорт. На Mac используйте ⌘ вместо Ctrl. Все файлы обрабатываются на вашем компьютере.</p><details className="model-credits"><summary>Авторы 3D-моделей</summary><p>iPhone 15 Pro Max — polyman, CC BY 4.0. Модели iPhone 18 Pro Max — extraakash, Sketchfab Standard. Файлы предоставлены пользователем. Названия соответствуют метаданным файлов.</p></details><button className="small-button reset-project" onClick={() => { mutate(() => structuredClone(INITIAL_DOCUMENT)); setActivePreset("front"); helpRef.current?.close(); showToast("Сцена сброшена. Изменение можно отменить."); }}><RotateCcw size={14} /> Сбросить всю сцену</button></dialog>
   </main></MotionConfig>;
 }
