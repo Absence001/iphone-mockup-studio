@@ -1,6 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
-import { chromium, devices, type Browser } from "playwright-core";
+import { chromium, devices, type Browser, type Page } from "playwright-core";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,28 +59,68 @@ async function launch(): Promise<Browser> {
   throw new CaptureError("Не найден браузер для снимка сайта. Установите Chrome или Edge либо выполните npx playwright install chromium.", 500);
 }
 
-async function captureSite(url: URL, width: number, height: number, desktop: boolean) {
+/**
+ * Предпросмотр всей страницы для выбора места снимка. Он идёт по 1 px на
+ * CSS-пиксель и в JPEG, чтобы длинная страница уложилась в лимит ответа.
+ */
+const PREVIEW_MAX_HEIGHT = 12000;
+
+/**
+ * Пролистывает страницу до конца предпросмотра: так подгружаются ленивые
+ * картинки и срабатывают анимации появления. Предпросмотр и итоговый снимок
+ * готовят страницу одинаково, чтобы выбранное место совпало.
+ */
+async function warmUp(page: Page) {
+  await page.evaluate(async (max) => {
+    const bottom = Math.min(document.documentElement.scrollHeight, max);
+    for (let y = window.innerHeight; y < bottom; y += window.innerHeight) {
+      window.scrollTo({ top: y, behavior: "instant" });
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }, PREVIEW_MAX_HEIGHT).catch(() => {});
+}
+
+/** Догружаем шрифты и картинки, но не ждём бесконечно сайты с постоянными запросами: аналитику, чаты, видео. */
+async function settle(page: Page, delay: number) {
+  await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+  await page.evaluate(() => document.fonts.ready).catch(() => {});
+  await page.waitForTimeout(delay);
+}
+
+/**
+ * Без scrollY возвращает предпросмотр всей страницы, с ним — снимок экрана
+ * в полном разрешении, прокрученного на scrollY CSS-пикселей.
+ */
+async function captureSite(url: URL, width: number, height: number, desktop: boolean, scrollY: number | null) {
   await assertPublicHost(url.hostname);
   const browser = await launch();
   try {
     const ratio = desktop ? DESKTOP_PIXEL_RATIO : PIXEL_RATIO;
+    const viewport = { width: Math.round(width / ratio), height: Math.round(height / ratio) };
     const context = await browser.newContext({
       ...(desktop ? {} : { userAgent: devices["iPhone 15 Pro Max"].userAgent, isMobile: true, hasTouch: true }),
-      viewport: { width: Math.round(width / ratio), height: Math.round(height / ratio) },
-      deviceScaleFactor: ratio, locale: "ru-RU",
+      viewport, deviceScaleFactor: ratio, locale: "ru-RU",
     });
     const page = await context.newPage();
     let response;
     try { response = await page.goto(url.href, { waitUntil: "load", timeout: 25000 }); }
     catch { throw new CaptureError("Сайт не открылся за 25 секунд. Проверьте адрес или попробуйте позже.", 502); }
     if (response && response.status() >= 400) throw new CaptureError(`Сайт ответил ошибкой ${response.status()}.`, 502);
-    // Догружаем шрифты и картинки первого экрана, но не ждём бесконечно
-    // сайты с постоянными запросами: аналитику, чаты, видео.
-    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
-    await page.evaluate(() => document.fonts.ready).catch(() => {});
-    await page.waitForTimeout(400);
+    await settle(page, 0);
+    await warmUp(page);
+    const name = url.hostname.replace(/^www\./, "");
+    if (scrollY === null) {
+      await settle(page, 300);
+      const pageHeight = await page.evaluate(() => Math.max(document.documentElement.scrollHeight, document.body?.scrollHeight ?? 0));
+      const previewHeight = Math.max(viewport.height, Math.min(pageHeight, PREVIEW_MAX_HEIGHT));
+      const image = await page.screenshot({ type: "jpeg", quality: 72, scale: "css", fullPage: true, clip: { x: 0, y: 0, width: viewport.width, height: previewHeight } });
+      return { image, name, type: "image/jpeg", viewport };
+    }
+    await page.evaluate((top) => window.scrollTo({ top, behavior: "instant" }), scrollY);
+    await settle(page, 600);
     const image = await page.screenshot({ type: "png" });
-    return { image, name: url.hostname.replace(/^www\./, "") };
+    return { image, name, type: "image/png", viewport };
   } finally { await browser.close(); }
 }
 
@@ -119,7 +159,7 @@ async function captureFigma(url: URL, width: number) {
   if (!source) throw new CaptureError("Figma не смогла отрисовать фрейм. Проверьте, что он не пустой и не скрыт.", 502);
   const response = await fetch(source, { cache: "no-store" });
   if (!response.ok) throw new CaptureError("Не удалось скачать картинку фрейма из Figma.", 502);
-  return { image: Buffer.from(await response.arrayBuffer()), name: frame.name || "Фрейм Figma" };
+  return { image: Buffer.from(await response.arrayBuffer()), name: frame.name || "Фрейм Figma", type: "image/png", viewport: null };
 }
 
 export async function POST(request: Request) {
@@ -132,8 +172,13 @@ export async function POST(request: Request) {
     try { url = new URL(String(body.url)); } catch { throw new CaptureError("Это не похоже на ссылку. Вставьте адрес вида https://example.com."); }
     if (url.protocol !== "https:" && url.protocol !== "http:") throw new CaptureError("Поддерживаются только ссылки http и https.");
     const figma = /(^|\.)figma\.com$/i.test(url.hostname);
-    const { image, name } = figma ? await captureFigma(url, width) : await captureSite(url, width, height, body.desktop === true);
-    return new Response(new Uint8Array(image), { headers: { "Content-Type": "image/png", "Cache-Control": "no-store", "X-Capture-Name": encodeURIComponent(name.slice(0, 120)) } });
+    // Без scrollY сайт возвращается предпросмотром всей страницы.
+    const scrollY = body.scrollY === undefined ? null : body.scrollY;
+    if (scrollY !== null && (typeof scrollY !== "number" || !Number.isInteger(scrollY) || scrollY < 0 || scrollY > PREVIEW_MAX_HEIGHT)) throw new CaptureError("Неверное место на странице.");
+    const { image, name, type, viewport } = figma ? await captureFigma(url, width) : await captureSite(url, width, height, body.desktop === true, scrollY);
+    const headers: Record<string, string> = { "Content-Type": type, "Cache-Control": "no-store", "X-Capture-Name": encodeURIComponent(name.slice(0, 120)) };
+    if (viewport) { headers["X-Viewport-Width"] = String(viewport.width); headers["X-Viewport-Height"] = String(viewport.height); }
+    return new Response(new Uint8Array(image), { headers });
   } catch (error) {
     if (error instanceof CaptureError) return fail(error.message, error.status);
     console.error(error);

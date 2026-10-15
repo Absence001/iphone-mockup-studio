@@ -211,7 +211,7 @@ svg { flex-shrink: 0; }
 .export-caption { display: flex; align-items: center; justify-content: space-between; margin-block-start: var(--space-sm); color: var(--fg-muted); font-size: var(--fs-micro-compact); font-variant-numeric: tabular-nums; }
 .toast { position: fixed; bottom: var(--space-xl); left: 50%; translate: -50% 0; z-index: 50; display: flex; align-items: center; gap: var(--space-sm); max-width: calc(100vw - 32px); padding: 12px var(--space-lg); color: var(--fg); background: var(--surface-3); border-radius: var(--radius-md); box-shadow: var(--shadow-5); font-size: var(--fs-body-compact); }
 .toast button { color: var(--fg-muted); display: grid; place-items: center; margin-inline-start: var(--space-sm); }
-.help-dialog { width: 500px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 48px); padding: var(--space-2xl); border: 0; border-radius: var(--radius-lg); color: var(--fg); background: var(--surface-3); box-shadow: var(--shadow-7); overflow: auto; }
+.help-dialog { margin: auto; width: 500px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 48px); padding: var(--space-2xl); border: 0; border-radius: var(--radius-lg); color: var(--fg); background: var(--surface-3); box-shadow: var(--shadow-7); overflow: auto; }
 .help-dialog { opacity: 0; transform: translateY(6px) scale(0.985); transition: opacity var(--dur-moderate) var(--ease-out), transform var(--dur-moderate) var(--ease-out), overlay var(--dur-moderate) allow-discrete, display var(--dur-moderate) allow-discrete; }
 .help-dialog[open] { opacity: 1; transform: none; }
 @starting-style { .help-dialog[open] { opacity: 0; transform: translateY(6px) scale(0.985); } }
@@ -222,6 +222,14 @@ svg { flex-shrink: 0; }
 .dialog-icon { display: grid; place-items: center; color: var(--fg-muted); }
 .help-dialog h2 { font-size: var(--fs-title); font-weight: 550; }
 .help-dialog > p { color: var(--fg-muted); margin-block-start: var(--space-xs); font-size: var(--fs-caption); }
+.page-picker { width: fit-content; min-width: min(420px, calc(100vw - 32px)); }
+.page-picker > p { max-width: 46ch; }
+.page-window { margin: var(--space-xl) auto var(--space-lg); overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; border-radius: var(--radius-md); background: #080909; box-shadow: 0 0 0 1px var(--border), var(--shadow-3, 0 8px 24px rgb(0 0 0 / 0.18)); scrollbar-width: thin; }
+.page-window:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 3px; }
+.page-window img { display: block; height: auto; user-select: none; }
+.page-picker-footer { display: flex; align-items: center; gap: var(--space-sm); }
+.page-picker-footer > span { flex: 1; color: var(--fg-muted); font-size: var(--fs-micro); font-variant-numeric: tabular-nums; }
+.small-button.primary { color: var(--background); background: var(--foreground); border-color: var(--foreground); font-weight: 550; }
 .shortcut-list { margin-block: var(--space-xl); }
 .shortcut-list > div { display: flex; justify-content: space-between; gap: var(--space-lg); border-bottom: 1px solid var(--border); padding-block: var(--space-sm); }
 .shortcut-list dt { font-size: var(--fs-micro); }
@@ -241,6 +249,7 @@ svg { flex-shrink: 0; }
   .export-button:hover:not(:disabled) svg { transform: translateY(1px); }
   .background-swatches button:hover { transform: scale(1.08); }
   .small-button:hover { background: var(--hover); border-color: var(--fg-muted); }
+  .small-button.primary:hover { background: var(--export-hover); border-color: var(--export-hover); }
   .text-button:hover, .toast button:hover, .light-advanced summary:hover, .zoom-toolbar .zoom-value:hover { color: var(--fg); }
   .text-button:hover { background: var(--hover); border-radius: var(--radius-sm); }
   .toast button:hover { background: var(--hover); }
@@ -277,6 +286,7 @@ svg { flex-shrink: 0; }
 .upload-card { transition: color var(--dur-fast) ease, background-color var(--dur-fast) ease, border-color var(--dur-fast) ease, box-shadow var(--dur-moderate) var(--ease-out); }
 .upload-card:active:not(:disabled), .small-button:active:not(:disabled), .text-button:active:not(:disabled) { background: var(--active); }
 .text-button:active:not(:disabled) { border-radius: var(--radius-sm); }
+.small-button.primary:active:not(:disabled) { background: var(--export-hover); }
 /* Ползунок: кольцо фокуса на бегунке вместо рамки вокруг всей дорожки. */
 .range::-webkit-slider-runnable-track { transition: background var(--dur-fast) ease; }
 .range::-webkit-slider-thumb { transition: transform var(--dur-moderate) var(--ease-out), box-shadow var(--dur-fast) ease; }

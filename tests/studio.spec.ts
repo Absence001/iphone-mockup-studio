@@ -292,21 +292,41 @@ test("минимальный интерфейс, понятный свет и с
 });
 
 test("вставка из буфера обмена и по ссылке на сайт или фрейм Figma", async ({ page }) => {
-  const requests: { url: string; width: number; height: number; desktop: boolean }[] = [];
+  const requests: { url: string; width: number; height: number; desktop: boolean; scrollY?: number }[] = [];
   let reply: { status: number; body: Buffer | string; contentType: string } = { status: 200, body: testImage(), contentType: "image/png" };
   await page.route("**/api/capture", async (route) => {
-    requests.push(route.request().postDataJSON());
-    await route.fulfill({ status: reply.status, contentType: reply.contentType, headers: { "X-Capture-Name": "example.com" }, body: reply.body });
+    const body = route.request().postDataJSON();
+    requests.push(body);
+    // Сайт без scrollY отвечает предпросмотром: страница 129 × 279 — это три окна 129 × 93.
+    const preview = reply.status === 200 && body.scrollY === undefined && !body.url.includes("figma.com");
+    await route.fulfill({ status: reply.status, contentType: reply.contentType, headers: { "X-Capture-Name": "example.com", ...preview ? { "X-Viewport-Width": "129", "X-Viewport-Height": "93" } : {} }, body: reply.body });
   });
+  const picker = page.getByRole("dialog", { name: "Какой экран снять?" });
   await start(page);
   const card = page.getByRole("button", { name: "Загрузить изображение на экран", exact: true });
   const field = page.getByRole("textbox", { name: "Ссылка на сайт или фрейм Figma", exact: true });
 
   // Адрес без протокола дополняется https://, а снимок запрашивается ровно в размер текстуры экрана.
   await field.fill("example.com"); await field.press("Enter");
-  await expect(page.locator('.toast[role="status"]')).toContainText("Сайт на экране");
+  await expect(picker).toBeVisible();
+  await expect(picker).toContainText("Начало страницы");
+  // Отмена ничего не снимает, ссылка остаётся в поле.
+  await page.keyboard.press("Escape");
+  await expect(picker).toBeHidden();
+  await expect(field).toHaveValue("example.com");
   expect(requests).toHaveLength(1);
+
+  // Место на странице выбирается прокруткой окна и уходит в запрос снимка.
+  await field.press("Enter");
+  await expect(picker).toBeVisible();
+  await picker.getByRole("region", { name: "Страница сайта" }).evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(picker).toContainText("Прокручено на 186 px");
+  await picker.getByRole("button", { name: "Снять этот экран" }).click();
+  await expect(page.locator('.toast[role="status"]')).toContainText("Сайт на экране");
+  expect(requests).toHaveLength(3);
   expect(requests[0]).toMatchObject({ url: "https://example.com/", width: 1290 });
+  expect(requests[0].scrollY).toBeUndefined();
+  expect(requests[2]).toMatchObject({ url: "https://example.com/", width: 1290, scrollY: 186 });
   expect(requests[0].height).toBeGreaterThan(2700); expect(requests[0].height).toBeLessThan(2900);
   await expect(card).toContainText("example.com.png");
   await expect(field).toHaveValue("");
@@ -337,7 +357,8 @@ test("вставка из буфера обмена и по ссылке на с
   expect(requests[0].desktop).toBe(false);
   await device(page, "MacBook Pro 14″"); await ready(page);
   await field.fill("example.com"); await field.press("Enter");
+  await picker.getByRole("button", { name: "Снять этот экран" }).click();
   await expect(page.locator('.toast[role="status"]')).toContainText("Сайт на экране");
-  expect(requests.at(-1)).toMatchObject({ width: 2796, desktop: true });
+  expect(requests.at(-1)).toMatchObject({ width: 2796, desktop: true, scrollY: 0 });
   expect(requests.at(-1)!.height).toBeGreaterThan(1750); expect(requests.at(-1)!.height).toBeLessThan(1900);
 });
