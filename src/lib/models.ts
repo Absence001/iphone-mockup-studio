@@ -9,6 +9,8 @@ export interface ScreenConfig {
   cutout: string[];
   /** Пропорция экрана, ширина / высота. */
   aspect: number;
+  /** Родное разрешение настоящего устройства: в нём скриншот ляжет на экран без обрезки и полей. */
+  pixels?: [number, number];
   /** Экран в файле развёрнут обратной стороной: картинку нужно отразить. */
   mirror?: boolean;
   /** Чёрная рамка под стеклом в долях меша по горизонтали и вертикали. */
@@ -35,7 +37,7 @@ export const DEVICES: DeviceModel[] = [
   {
     id: "iphone15", name: "iPhone 15 Pro Max", group: "iPhone", kind: "phone", unit: 7.98, rotateY: Math.PI,
     finishes: [{ id: "black", name: "Black", color: "#38393b", path: "/models/iphone.glb" }],
-    screen: { mesh: "xXDHkMplTIDAXLN", aspect: 1290 / 2796, cutout: ["DjdhycfQYjKMDyn", "usFLmqcyrnltBUr", "SysBlPspVQNIcce", "IMPDFDiRXhPIUMV", "EbQGKrWAqhBHiMv", "EddVrWkqZTlvmci", "aGrbyjnzqoVJenz", "KSWlaxBcnPDpFCs", "AQkWXGdRSkSZMav"] },
+    screen: { mesh: "xXDHkMplTIDAXLN", aspect: 1290 / 2796, pixels: [1290, 2796], cutout: ["DjdhycfQYjKMDyn", "usFLmqcyrnltBUr", "SysBlPspVQNIcce", "IMPDFDiRXhPIUMV", "EbQGKrWAqhBHiMv", "EddVrWkqZTlvmci", "aGrbyjnzqoVJenz", "KSWlaxBcnPDpFCs", "AQkWXGdRSkSZMav"] },
   },
   {
     id: "iphone18", name: "iPhone 18 Pro Max", group: "iPhone", kind: "phone", unit: 8.16, rotateY: 0,
@@ -45,7 +47,7 @@ export const DEVICES: DeviceModel[] = [
       { id: "burgundy", name: "Burgundy", color: "#63303e", path: "/models/iphone18-burgundy.glb" },
       { id: "silver", name: "Silver", color: "#d0d1d2", path: "/models/iphone18-silver.glb" },
     ],
-    screen: { mesh: "Object_60", aspect: 1290 / 2796, cutout: IPHONE18_ISLAND },
+    screen: { mesh: "Object_60", aspect: 1320 / 2868, pixels: [1320, 2868], cutout: IPHONE18_ISLAND },
   },
   {
     id: "iphoneDuo", name: "iPhone Duo", group: "iPhone", kind: "foldable", unit: 7.22, rotateY: 0,
@@ -63,18 +65,18 @@ export const DEVICES: DeviceModel[] = [
   {
     id: "galaxyS26Ultra", name: "Galaxy S26 Ultra", group: "Android", kind: "phone", unit: 8.15, rotateY: 0,
     finishes: [{ id: "violet", name: "Violet", color: "#a9a3e2", path: "/models/galaxy-s26-ultra.glb" }],
-    screen: { mesh: "Object_35", aspect: 0.073 / 0.158, cutout: ["Object_29", "Object_32", "Object_38"] },
+    screen: { mesh: "Object_35", aspect: 1440 / 3120, pixels: [1440, 3120], cutout: ["Object_29", "Object_32", "Object_38"] },
   },
   {
     id: "macbookPro14", name: "MacBook Pro 14″", group: "Mac", kind: "laptop", unit: 15.8, rotateY: 0,
     finishes: [{ id: "spaceBlack", name: "Space Black", color: "#2e2e30", path: "/models/macbook-pro-14.glb" }],
-    screen: { mesh: "Object_107", aspect: 3024 / 1964, cutout: [] },
+    screen: { mesh: "Object_107", aspect: 3024 / 1964, pixels: [3024, 1964], cutout: [] },
   },
   {
     id: "proDisplayXdr", name: "Pro Display XDR", group: "Дисплеи", kind: "display", unit: 31.3, rotateY: 0,
     finishes: [{ id: "silver", name: "Silver", color: "#d0d1d2", path: "/models/pro-display-xdr.glb" }],
     // Меш экрана — всё стекло 720 × 411 мм, активная область 703 × 395 мм.
-    screen: { mesh: "IyklIWCEUuwKzOr", aspect: 6016 / 3384, cutout: [], mirror: true, inset: [0.012, 0.02] },
+    screen: { mesh: "IyklIWCEUuwKzOr", aspect: 6016 / 3384, pixels: [6016, 3384], cutout: [], mirror: true, inset: [0.012, 0.02] },
   },
 ];
 

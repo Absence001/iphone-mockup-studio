@@ -11,6 +11,8 @@ type LoadState = { status: "loading" | "ready" | "error"; message?: string };
 type Callbacks = {
   camera: (camera: CameraSettings) => void;
   model: (state: LoadState) => void;
+  /** Активный экран сменился: его размер в пикселях. */
+  screen: (size: { width: number; height: number }) => void;
   /** Видео на экране пошло или встало: кнопка в панели идёт за сценой. */
   video?: (playing: boolean) => void;
 };
@@ -500,8 +502,8 @@ export class StudioScene {
     this.needsRender = true;
   }
 
-  /** Размер текстуры экрана в пикселях: под него снимаются сайты и фреймы Figma. */
-  /** Активная область экрана в пикселях холста, без чёрной рамки монитора. */
+  /** Активная область экрана в пикселях холста, без чёрной рамки монитора:
+   *  под неё снимаются сайты и фреймы Figma, а у модели без родного разрешения её размер советуется для скриншота. */
   get screenSize() {
     const [insetX, insetY] = this.screen?.inset ?? [0, 0];
     return { width: Math.round(this.screenCanvas.width * (1 - insetX * 2)), height: Math.round(this.screenCanvas.height * (1 - insetY * 2)) };
@@ -707,6 +709,7 @@ export class StudioScene {
       this.screenTexture.dispose();
     }
     this.screen = next;
+    if (next) this.callbacks.screen(this.screenSize);
     // Центр считается без поворота сцены, иначе крен сдвинет модель.
     const parent = this.model.parent;
     parent?.remove(this.model);
