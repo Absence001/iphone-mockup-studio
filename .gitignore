@@ -1,0 +1,11 @@
+node_modules/
+.next/
+out/
+test-results/
+playwright-report/
+*.tsbuildinfo
+.local/
+.vercel/
+.env*
+!.env.example
+.claude/settings.local.json
