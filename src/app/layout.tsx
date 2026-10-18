@@ -7,6 +7,9 @@ export const metadata: Metadata = {
   title: "Мокапы",
   applicationName: "Мокапы",
   description: "Локальная студия 3D-мокапов iPhone. Загрузите экран, выберите ракурс и сохраните PNG.",
+  icons: {
+    icon: "/favicon.png",
+  },
 };
 
 // Разметка приходит с тёмной темой; скрипт успевает снять её до первой
