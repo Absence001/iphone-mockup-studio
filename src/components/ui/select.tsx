@@ -271,6 +271,7 @@ const SelectTrigger = forwardRef<HTMLButtonElement, SelectTriggerProps>(
     },
     ref
   ) => {
+    const { open } = useSelectContext();
     const shape = useShape();
     const sizeClasses = useSize(size);
     const compact = sizeClasses.variant === "compact";
@@ -321,7 +322,13 @@ const SelectTrigger = forwardRef<HTMLButtonElement, SelectTriggerProps>(
               strokeWidth={2}
               strokeLinecap="round"
               strokeLinejoin="round"
-              className="shrink-0 text-muted-foreground transition-colors duration-80 group-hover:text-foreground"
+              // Keyed off the visual open state, not Radix's data-state: that
+              // one stays "open" through the exit tween, so the chevron would
+              // flip back late.
+              className={cn(
+                "shrink-0 text-muted-foreground transition-[color,transform] duration-150 ease-out group-hover:text-foreground",
+                open && "rotate-180 text-foreground"
+              )}
             >
               <path d="M6 9l6 6 6-6" />
             </svg>
