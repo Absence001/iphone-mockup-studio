@@ -1,6 +1,6 @@
 export const CLARITY_PROJECT_ID = "yy55bnhv3e";
 
-export type AnalyticsEvent = "editor_active" | "mockup_export_png" | "mockup_export_video";
+export type AnalyticsEvent = "editor_active" | "mockup_export_png" | "mockup_copy_png" | "mockup_export_video";
 
 declare global {
   interface Window {

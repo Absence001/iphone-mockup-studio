@@ -1,3 +1,4 @@
+import { openSection } from "./inspector";
 import { test, expect, type Page } from "@playwright/test";
 import { readFile, mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
@@ -5,18 +6,19 @@ import { historyReducer, INITIAL_HISTORY } from "../src/lib/history";
 import { parseProject } from "../src/lib/project";
 import { QUAD, decodePNG, quadImage, testImage } from "./png";
 
-async function ready(page: Page) { await expect(page.getByRole("button", { name: "Скачать мокап" })).toBeEnabled(); }
+async function ready(page: Page) { await expect(page.getByRole("button", { name: "Скачать PNG" })).toBeEnabled(); }
 async function start(page: Page) { await page.goto("/"); await ready(page); }
+
 async function choose(page: Page, label: string, name: string) {
   await page.getByRole("combobox", { name: label, exact: true }).click();
   await page.getByRole("option", { name, exact: true }).click();
   await expect(page.getByRole("listbox")).toHaveCount(0);
 }
 async function preset(page: Page, name: string) { await choose(page, "Ракурс", name); }
-async function device(page: Page, name: string) { await choose(page, "Модель устройства", name); }
+async function device(page: Page, name: string) { await openSection(page, "Устройство"); await choose(page, "Модель устройства", name); }
 async function exportPNG(page: Page) {
   const download = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Скачать мокап" }).click();
+  await page.getByRole("button", { name: "Скачать PNG" }).click();
   const file = await download, path = await file.path();
   if (!path) throw new Error("PNG не сохранён");
   await ready(page);
@@ -60,6 +62,7 @@ test("прямой ракурс по умолчанию, темы без оши�
   });
   await start(page);
   await expect(page.locator("html")).toHaveClass("dark");
+  await openSection(page, "Камера");
   await expect(page.getByRole("combobox", { name: "Ракурс", exact: true })).toContainText("Прямо");
   await expect(page.getByRole("button", { name: "Ортография", exact: true })).toHaveAttribute("aria-pressed", "true");
   for (const name of ["Поворот", "Наклон", "Крен"]) await expect(page.getByRole("spinbutton", { name, exact: true })).toHaveValue("0");
@@ -80,6 +83,7 @@ test("прямой ракурс по умолчанию, темы без оши�
   await page.getByRole("button", { name: "Включить тёмную тему", exact: true }).click();
   await page.reload(); await ready(page);
   await expect(page.locator("html")).toHaveClass("dark");
+  await openSection(page, "Камера");
   await preset(page, "Студийный");
   await expect(page.getByRole("button", { name: "Перспектива", exact: true })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "Сбросить настройки камеры", exact: true }).click();
@@ -91,6 +95,7 @@ test("прямой ракурс по умолчанию, темы без оши�
 test("навигация как в редакторе, отмена пресета и независимость экспорта", async ({ page }) => {
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await start(page);
+  await openSection(page, "Камера");
   await page.getByLabel("Разрешение", { exact: true }).selectOption("1200");
   await preset(page, "Прямо");
   const before = await exportPNG(page);
@@ -127,11 +132,11 @@ test("модели iPhone, ракурсы, изображение, отмена 
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await start(page);
   await expect(page.locator(".screen-size")).toHaveText("1290 × 2796 px");
-  await page.locator('input[type="file"]').setInputFiles({ name: "экран.png", mimeType: "image/png", buffer: testImage() });
+  await page.getByLabel("Файл изображения, видео или проекта", { exact: true }).setInputFiles({ name: "экран.png", mimeType: "image/png", buffer: testImage() });
   await expect(page.getByText("экран.png", { exact: true })).toBeVisible();
   await page.getByLabel("Разрешение", { exact: true }).selectOption("1200");
   await preset(page, "Прямо");
-  await page.getByRole("tab", { name: "Экран", exact: true }).click();
+  await openSection(page, "Экран");
   await page.getByRole("spinbutton", { name: "Отражения на стекле", exact: true }).fill("0");
   await device(page, "iPhone 18 Pro Max"); await ready(page);
   await expect(page.locator(".screen-size")).toHaveText("1320 × 2868 px");
@@ -159,7 +164,7 @@ test("модели iPhone, ракурсы, изображение, отмена 
   const parsed = parseProject(await readFile(path, "utf8"));
   expect(parsed.settings.finish).toBe("burgundy"); expect(parsed.imageData).toMatch(/^data:image\/png;base64,/);
   await device(page, "iPhone 15 Pro Max"); await ready(page);
-  await page.locator('input[type="file"]').setInputFiles({ name: "проект.forma.json", mimeType: "application/json", buffer: Buffer.from(await readFile(path)) }); await ready(page);
+  await page.getByLabel("Файл изображения, видео или проекта", { exact: true }).setInputFiles({ name: "проект.forma.json", mimeType: "application/json", buffer: Buffer.from(await readFile(path)) }); await ready(page);
   await expect(page.getByRole("combobox", { name: "Модель устройства", exact: true })).toContainText("iPhone 18 Pro Max");
   await expect(page.getByRole("combobox", { name: "Цвет корпуса", exact: true })).toContainText("Burgundy");
   await page.getByRole("button", { name: "Убрать изображение", exact: true }).click();
@@ -169,13 +174,13 @@ test("модели iPhone, ракурсы, изображение, отмена 
 
 test("PNG 4K: размеры, альфа-канал, ориентация экрана и все форматы кадра", async ({ page }) => {
   await start(page);
-  await page.locator('input[type="file"]').setInputFiles({ name: "orientation.png", mimeType: "image/png", buffer: testImage() });
+  await page.getByLabel("Файл изображения, видео или проекта", { exact: true }).setInputFiles({ name: "orientation.png", mimeType: "image/png", buffer: testImage() });
   await expect(page.getByText("orientation.png", { exact: true })).toBeVisible();
   await preset(page, "Прямо");
-  await page.getByRole("tab", { name: "Экран", exact: true }).click();
+  await openSection(page, "Экран");
   await page.getByRole("spinbutton", { name: "Отражения на стекле", exact: true }).fill("0");
-  await page.getByRole("tab", { name: "Сцена", exact: true }).click();
-  await page.getByRole("button", { name: "Прозрачный", exact: true }).click();
+  await openSection(page, "Фон");
+  await page.getByRole("button", { name: "Без фона", exact: true }).click();
   await page.getByLabel("Разрешение", { exact: true }).selectOption("3840");
   const png = decodePNG(await exportPNG(page));
   expect([png.width, png.height]).toEqual([3840, 2880]);
@@ -198,7 +203,7 @@ test("PNG 4K: размеры, альфа-канал, ориентация экр
   }
   expect(minY, "Телефон не должен обрезаться сверху в готовом ракурсе").toBeGreaterThan(10);
   expect(maxY, "Ближний торец должен полностью попадать в готовый кадр").toBeLessThan(hero.height - 10);
-  await page.getByRole("tab", { name: "Экран", exact: true }).click();
+  await openSection(page, "Экран");
   await page.getByRole("checkbox", { name: "Вырез камеры" }).uncheck();
   await preset(page, "Прямо");
   const noIsland = decodePNG(await exportPNG(page));
@@ -218,12 +223,14 @@ function quadrants(png: ReturnType<typeof decodePNG>) {
 }
 
 test("все модели и цвета: экран без зеркала, сгиб Duo, крышка MacBook и проект", async ({ page }) => {
+  // Перебор всех моделей на программном рендере шёл на самой границе общего лимита в 90 секунд.
+  test.setTimeout(180_000);
   const errors: string[] = []; page.on("pageerror", (error) => errors.push(error.message));
   await start(page);
-  await page.locator('input[type="file"]').setInputFiles({ name: "quad.png", mimeType: "image/png", buffer: quadImage() });
+  await page.getByLabel("Файл изображения, видео или проекта", { exact: true }).setInputFiles({ name: "quad.png", mimeType: "image/png", buffer: quadImage() });
   await expect(page.getByText("quad.png", { exact: true })).toBeVisible();
   await page.getByLabel("Разрешение", { exact: true }).selectOption("1200");
-  await page.getByRole("tab", { name: "Экран", exact: true }).click();
+  await openSection(page, "Экран");
   await page.getByRole("spinbutton", { name: "Отражения на стекле", exact: true }).fill("0");
   const check = async (label: string) => {
     const quad = quadrants(decodePNG(await exportPNG(page)));
@@ -292,17 +299,66 @@ test("все модели и цвета: экран без зеркала, сг�
   expect(errors).toEqual([]);
 });
 
-test("ошибки файлов, клавиатурные вкладки и адаптивный интерфейс", async ({ page }) => {
+test("категории помнят раскрытие разделов и не меняют историю сцены", async ({ page }) => {
   await start(page);
-  await page.locator('input[type="file"]').setInputFiles({ name: "broken.png", mimeType: "image/png", buffer: Buffer.from("не изображение") });
+  const section = (name: string) => page.getByRole("button", { name, exact: true });
+  const undo = section("Отменить (Ctrl+Z)");
+  for (const name of ["Устройство", "Экран"]) await expect(section(name)).toHaveAttribute("aria-expanded", "true");
+  for (const name of ["Камера", "Фон", "Свет", "Тень"]) await expect(section(name)).toHaveCount(0);
+  await section("Экран").click();
+  await openSection(page, "Свет");
+  await expect(undo).toBeDisabled();
+  const intensity = page.getByRole("spinbutton", { name: "Яркость", exact: true });
+  await intensity.fill("72"); await intensity.press("Enter");
+  await page.locator(".light-advanced summary").click();
+  await section("Свет").click(); await openSection(page, "Свет");
+  await expect(intensity).toHaveValue("72");
+  await expect(page.getByRole("spinbutton", { name: "Экспозиция", exact: true })).toBeVisible();
+  await section("Раздел: Устройство").click();
+  await expect(section("Экран")).toHaveAttribute("aria-expanded", "false");
+  await openSection(page, "Свет");
+  await expect(intensity).toHaveValue("72");
+  await undo.click();
+  await expect(intensity).toHaveValue(String(INITIAL_HISTORY.present.settings.light.intensity));
+  await expect(undo).toBeDisabled();
+  await page.setViewportSize({ width: 1024, height: 640 });
+  for (const name of ["Фон", "Тень"]) await openSection(page, name);
+  const download = section("Скачать PNG");
+  const bounds = await download.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(640);
+  await page.locator(".inspector-scroll").evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(page.getByRole("spinbutton", { name: "Расстояние до фона", exact: true })).toBeInViewport();
+  await expect(download).toBeInViewport();
+  await page.reload(); await ready(page);
+  await expect(section("Экран")).toHaveAttribute("aria-expanded", "false");
+  await expect(undo).toBeDisabled();
+  await expect(page.locator("#inspector-open")).toHaveCount(0);
+  await openSection(page, "Свет");
+  await expect(section("Свет")).toHaveAttribute("aria-expanded", "true");
+  await page.setViewportSize({ width: 1440, height: 960 });
+  await openSection(page, "Камера");
+  await mkdir("artifacts/previews", { recursive: true });
+  await page.screenshot({ path: "artifacts/previews/inspector-camera-dark.png" });
+  await section("Включить светлую тему").click();
+  await page.screenshot({ path: "artifacts/previews/inspector-camera-light.png" });
+});
+test("ошибки файлов, клавиатурное раскрытие и адаптивный интерфейс", async ({ page }) => {
+  await start(page);
+  await page.getByLabel("Файл изображения, видео или проекта", { exact: true }).setInputFiles({ name: "broken.png", mimeType: "image/png", buffer: Buffer.from("не изображение") });
   await expect(page.locator('.toast[role="alert"]')).toContainText("Не удалось прочитать изображение");
-  await page.getByRole("tab", { name: "Камера", exact: true }).focus(); await page.keyboard.press("ArrowRight");
-  await expect(page.getByRole("tab", { name: "Экран", exact: true })).toBeFocused();
+  const camera = page.getByRole("button", { name: "Камера", exact: true });
+  await openSection(page, "Камера"); await camera.focus();
+  await page.keyboard.press("Space");
+  await expect(camera).toHaveAttribute("aria-expanded", "false");
+  await expect(camera).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(page.getByRole("button", { name: "16:9", exact: true })).toBeFocused();
   await page.getByRole("button", { name: "Горячие клавиши", exact: true }).click();
   await expect(page.getByRole("dialog")).toBeVisible(); await page.keyboard.press("Escape"); await expect(page.getByRole("dialog")).not.toBeVisible();
   for (const [width, height] of [[1440, 960], [1024, 768], [390, 844]]) {
     await page.setViewportSize({ width, height });
-    await expect(page.getByRole("button", { name: "Скачать мокап" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Скачать PNG" })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   }
 });
@@ -312,18 +368,19 @@ test("минимальный интерфейс, понятный свет и с
   await expect(page.locator(".app-header, .presets-section, .stage-footer")).toHaveCount(0);
   await expect(page.getByText("Хороший ракурс — в один клик")).toHaveCount(0);
   await expect(page.getByText("Сделано для ваших идей")).toHaveCount(0);
-  await page.getByRole("tab", { name: "Сцена", exact: true }).click();
+  await openSection(page, "Свет");
   await expect(page.getByRole("spinbutton", { name: "Яркость", exact: true })).toBeVisible();
   await expect(page.getByRole("spinbutton", { name: "Экспозиция", exact: true })).not.toBeVisible();
   await page.getByLabel("Разрешение", { exact: true }).selectOption("1200");
   const soft = await exportPNG(page);
-  await page.getByRole("button", { name: "Контровой", exact: true }).click();
+  await choose(page, "Схема освещения", "Контровой");
   await expect(page.getByText("Полосы света сзади рисуют контур на тёмном фоне.")).toBeVisible();
   const rim = await exportPNG(page);
   expect(createHash("sha256").update(rim).digest("hex")).not.toBe(createHash("sha256").update(soft).digest("hex"));
   await page.keyboard.press("Control+z");
-  await expect(page.getByRole("button", { name: "Мягкий", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("combobox", { name: "Схема освещения", exact: true })).toContainText("Мягкий");
   // Тень по умолчанию включена; выключенная убирает ползунки и меняет кадр.
+  await openSection(page, "Тень");
   await expect(page.getByRole("spinbutton", { name: "Плотность тени", exact: true })).toBeVisible();
   await page.getByText("Тень на фоне", { exact: true }).click();
   await expect(page.getByRole("spinbutton", { name: "Плотность тени", exact: true })).toHaveCount(0);
@@ -338,7 +395,7 @@ test("минимальный интерфейс, понятный свет и с
   await mkdir("artifacts/previews", { recursive: true });
   await page.getByRole("button", { name: "Включить светлую тему", exact: true }).click();
   await page.screenshot({ path: "artifacts/previews/studio-light.png" });
-  await page.getByRole("tab", { name: "Камера", exact: true }).click();
+  await openSection(page, "Камера");
   await page.screenshot({ path: "artifacts/previews/studio.png" });
 });
 
@@ -354,7 +411,7 @@ test("вставка из буфера обмена и по ссылке на с
   });
   const picker = page.getByRole("dialog", { name: "Какой экран снять?" });
   await start(page);
-  const card = page.getByRole("button", { name: "Загрузить изображение на экран", exact: true });
+  const card = page.getByRole("button", { name: "Загрузить изображение или видео на экран", exact: true });
   const field = page.getByRole("textbox", { name: "Ссылка на сайт или фрейм Figma", exact: true });
 
   // Адрес без протокола дополняется https://, а снимок запрашивается ровно в размер текстуры экрана.

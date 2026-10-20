@@ -10,11 +10,11 @@ test("DAU отмечает взаимодействие и новый день, 
   await page.clock.setFixedTime(new Date("2026-10-15T10:00:00Z"));
   await page.addInitScript(() => { window.clarity = (_command, event) => console.info(`analytics-test:${event}`); });
   await page.goto("/");
-  const button = page.getByRole("button", { name: "Скачать мокап", exact: true });
+  const button = page.getByRole("button", { name: "Скачать PNG", exact: true });
   await expect(button).toBeEnabled();
   expect(events).toEqual([]);
-  await page.getByRole("tab", { name: "Сцена", exact: true }).click();
-  await page.getByRole("tab", { name: "Камера", exact: true }).click();
+  await page.getByRole("button", { name: "Раздел: Сцена", exact: true }).click();
+  await page.getByRole("button", { name: "Раздел: Камера", exact: true }).click();
   await expect.poll(() => events.filter((event) => event === "editor_active").length).toBe(1);
   await page.getByLabel("Разрешение", { exact: true }).selectOption("1200");
   const exported = page.waitForEvent("download");
@@ -25,7 +25,7 @@ test("DAU отмечает взаимодействие и новый день, 
   await page.clock.setFixedTime(new Date("2026-10-16T10:00:00Z"));
   await page.evaluate(() => document.querySelector(".studio-shell")?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true })));
   expect(events.filter((event) => event === "editor_active")).toHaveLength(1);
-  await page.getByRole("tab", { name: "Экран", exact: true }).click();
+  await page.getByRole("button", { name: "Раздел: Устройство", exact: true }).click();
   await expect.poll(() => events.filter((event) => event === "editor_active").length).toBe(2);
 
   const original = await page.evaluateHandle(() => HTMLCanvasElement.prototype.toBlob);

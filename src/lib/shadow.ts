@@ -3,14 +3,18 @@ import { FullScreenQuad } from "three/addons/postprocessing/Pass.js";
 
 /** Разрешение маски тени. Тень мягкая, большего не нужно. */
 const SIZE = 512;
-/** Отклонение света от оси камеры: от него зависит, насколько тень уходит вбок. */
-const TILT = Math.tan(THREE.MathUtils.degToRad(28));
+/**
+ * Отклонение света от оси камеры по длине тени: от 8° — тень почти под
+ * устройством — до 65° — длинная тень вбок. Длина 0,35 даёт прежние 28°.
+ */
+const tilt = (length: number) => Math.tan(THREE.MathUtils.degToRad(8 + length * 57));
 
 export interface ShadowOptions {
   /** Все величины в долях единицы, как ползунки в панели. */
   opacity: number;
   softness: number;
   distance: number;
+  length: number;
   color: THREE.Color;
   /** Направление на главный софтбокс в мировых координатах. */
   from: THREE.Vector3;
@@ -45,6 +49,8 @@ export class BackdropShadow {
   private readonly quad = new FullScreenQuad(this.blur);
   private readonly material: THREE.ShaderMaterial;
   private readonly corner = new THREE.Vector3();
+  private readonly world = new THREE.Box3();
+  private readonly sphere = new THREE.Sphere();
   private readonly clear = new THREE.Color();
 
   constructor() {
@@ -81,25 +87,30 @@ export class BackdropShadow {
     let x = local.x, y = local.y;
     if (Math.hypot(x, y) < 0.15) { x = -0.45; y = 0.9; }
     const length = Math.hypot(x, y);
-    const toLight = new THREE.Vector3(x / length * TILT, y / length * TILT, 1).normalize().applyQuaternion(view.quaternion);
-    // Плоскость стоит за самой дальней от камеры точкой устройства.
+    const slope = tilt(options.length);
+    const toLight = new THREE.Vector3(x / length * slope, y / length * slope, 1).normalize().applyQuaternion(view.quaternion);
+    // Плоскость стоит за самой дальней от камеры точкой устройства. Габарит
+    // считается в координатах сцены: устройство бывает сдвинуто и увеличено.
     const forward = view.getWorldDirection(new THREE.Vector3());
     let behind = -Infinity;
+    device.updateMatrixWorld(true);
+    this.world.makeEmpty();
     for (let index = 0; index < 8; index++) {
       this.corner.set(index & 1 ? bounds.max.x : bounds.min.x, index & 2 ? bounds.max.y : bounds.min.y, index & 4 ? bounds.max.z : bounds.min.z).applyMatrix4(device.matrixWorld);
+      this.world.expandByPoint(this.corner);
       behind = Math.max(behind, this.corner.dot(forward));
     }
     const gap = 0.08 + options.distance * 1.6;
     this.plane.position.copy(forward).multiplyScalar(behind + gap);
     this.plane.quaternion.copy(view.quaternion);
     // Чем дальше фон и крупнее источник, тем шире полутень.
-    const radius = bounds.getBoundingSphere(new THREE.Sphere()).radius;
+    const { radius, center } = this.world.getBoundingSphere(this.sphere);
     const spread = 0.02 + options.softness * 0.18 + gap * (0.12 + options.softness * 0.45);
     const half = radius + spread * 2 + 0.05;
     Object.assign(this.camera, { left: -half, right: half, top: half, bottom: -half, near: 0.5, far: radius * 2 + 3.5 });
-    this.camera.position.copy(toLight).multiplyScalar(radius + 2);
+    this.camera.position.copy(toLight).multiplyScalar(radius + 2).add(center);
     this.camera.up.set(0, 1, 0).applyQuaternion(view.quaternion);
-    this.camera.lookAt(0, 0, 0);
+    this.camera.lookAt(center);
     this.camera.updateProjectionMatrix();
     this.camera.updateMatrixWorld();
     this.material.uniforms.matrix.value.multiplyMatrices(this.camera.projectionMatrix, this.camera.matrixWorldInverse);

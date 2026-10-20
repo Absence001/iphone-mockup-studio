@@ -1,10 +1,15 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { TransformControls, TransformControlsGizmo } from "three/addons/controls/TransformControls.js";
+import { FullScreenQuad } from "three/addons/postprocessing/Pass.js";
+import { ZipWriter } from "./zip";
+import type { ExportAudio } from "./audio";
+import type { SceneLayout } from "./camera-moves";
 import { deviceFinish, deviceModel, finishScreens, type DeviceModel, type ScreenConfig } from "./models";
 import { SpecularGlossinessPlugin } from "./spec-gloss";
 import { recolor } from "./recolor";
-import { FOLD_OPEN, FOLD_OUTER_BELOW, clamp, videoEnd, type CameraSettings, type Settings } from "./settings";
+import { FOLD_OPEN, FOLD_OUTER_BELOW, clamp, videoEnd, type CameraSettings, type DeviceTransform, type Settings } from "./settings";
 import { backgroundPreset, paintBackground } from "./backgrounds";
 import { StudioLight, shadowDirection } from "./studio-light";
 import { BackdropShadow, type ShadowOptions } from "./shadow";
@@ -17,7 +22,17 @@ type Callbacks = {
   screen: (size: { width: number; height: number }) => void;
   /** Видео на экране пошло или встало: кнопка в панели идёт за сценой. */
   video?: (playing: boolean) => void;
+  /** Манипулятор сдвинул, повернул или масштабировал устройство. */
+  transform?: (value: DeviceTransform, phase: "start" | "change" | "end") => void;
 };
+
+/** Инструмент на сцене: камера вращается всегда, манипулятор — по выбору. */
+export type GizmoMode = "none" | "translate" | "rotate" | "scale";
+
+/** Угол, ближайший к предыдущему: без скачка через ±180°. */
+function unwrap(previous: number, next: number) {
+  return next + Math.round((previous - next) / 360) * 360;
+}
 
 /** Ждёт, пока видео реально встанет на запрошенную секунду. */
 function seek(video: HTMLVideoElement, time: number): Promise<void> {
@@ -29,15 +44,52 @@ function seek(video: HTMLVideoElement, time: number): Promise<void> {
   });
 }
 
-/** Кодеки по убыванию качества; берём первый, который умеет браузер. */
-function recorderMime(): string | null {
+/** Формат экспорта анимации: WebM с прозрачностью, MP4 без неё или последовательность PNG. */
+export type ExportFormat = "webm" | "mp4" | "png";
+
+/**
+ * Кодеки по убыванию качества; берём первый, который умеет браузер. Альфа-канал
+ * сохраняют только VP9 и VP8 в WebM — это проверено записью холста с
+ * прозрачностью; H.264 и AV1 его отбрасывают.
+ */
+function recorderMime(format: "webm" | "mp4", audio = false): string | null {
   if (typeof MediaRecorder === "undefined") return null;
-  return ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"].find((type) => MediaRecorder.isTypeSupported(type)) ?? null;
+  const types = format === "webm" ? audio ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"] : ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"] : audio ? ["video/mp4;codecs=avc1,mp4a.40.2", "video/mp4"] : ["video/mp4;codecs=avc1", "video/mp4"];
+  return types.find((type) => MediaRecorder.isTypeSupported(type)) ?? null;
 }
 
-/** Умеет ли браузер записывать экспорт в видео. */
-export function canExportVideo(): boolean {
-  return recorderMime() !== null && typeof HTMLCanvasElement.prototype.captureStream === "function";
+/** Какие форматы ролика умеет записывать браузер. Последовательность PNG доступна всегда. */
+export function videoFormats(): Record<"webm" | "mp4", boolean> {
+  const capture = typeof HTMLCanvasElement !== "undefined" && typeof HTMLCanvasElement.prototype.captureStream === "function";
+  return { webm: capture && recorderMime("webm") !== null, mp4: capture && recorderMime("mp4") !== null };
+}
+
+/**
+ * Сколько подкадров усредняется для размытия движения: при воспроизведении
+ * меньше — ради плавности, на паузе больше — чтобы оценить кадр, в экспорте
+ * больше всего.
+ */
+const PLAYING_SAMPLES = 5;
+const PAUSED_SAMPLES = 12;
+const EXPORT_SAMPLES = 16;
+
+/** Усреднение подкадров: каждый добавляется в накопитель со своим весом. */
+const accumulateShader = {
+  uniforms: { map: { value: null as THREE.Texture | null }, weight: { value: 1 } },
+  vertexShader: "varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }",
+  fragmentShader: "uniform sampler2D map; uniform float weight; varying vec2 vUv; void main() { gl_FragColor = texture2D(map, vUv) * weight; }",
+};
+
+interface Motion {
+  /** Медиа идут по таймлайну, а не своим воспроизведением. */
+  timeline: boolean;
+  time: number;
+  playing: boolean;
+  /** Настройки сцены в момент времени: нужны для подкадров размытия. */
+  sample: ((time: number) => Settings) | null;
+  /** Доля кадра, в течение которой открыт затвор; 0 — без размытия. */
+  blur: number;
+  fps: number;
 }
 
 /**
@@ -197,8 +249,29 @@ export class StudioScene {
   private readonly perspective = new THREE.PerspectiveCamera(35, 1, 0.01, 100);
   private readonly orthographic = new THREE.OrthographicCamera(-2, 2, 1.5, -1.5, 0.01, 100);
   private camera: THREE.PerspectiveCamera | THREE.OrthographicCamera = this.perspective;
+  /** Крен камеры: поворот всей группы вокруг оси взгляда. */
   private readonly device = new THREE.Group();
-  /** Устройство в координатах группы device: по нему ставится тень на фоне. */
+  /** Положение устройства внутри кадра: сдвиг, поворот и масштаб от манипулятора. */
+  private readonly pose = new THREE.Group();
+  /** Манипулятор рисуется отдельной сценой поверх кадра: он не отбрасывает тень и не попадает в экспорт. */
+  private readonly overlay = new THREE.Scene();
+  private readonly gizmo: TransformControls;
+  private gizmoMode: GizmoMode = "none";
+  private gizmoDragging = false;
+  private orbitAllowed = true;
+  private scaleStart = 1;
+  private transformFrame = 0;
+  private motion: Motion = { timeline: false, time: 0, playing: false, sample: null, blur: 0, fps: 30 };
+  /** Размытие движения: копия кадра, накопитель и проход усреднения. */
+  private frameCopy: THREE.FramebufferTexture | null = null;
+  private accumulator: THREE.WebGLRenderTarget | null = null;
+  private readonly accumulate = new THREE.ShaderMaterial({
+    ...accumulateShader, uniforms: THREE.UniformsUtils.clone(accumulateShader.uniforms), depthTest: false, depthWrite: false,
+    blending: THREE.CustomBlending, blendEquation: THREE.AddEquation, blendSrc: THREE.OneFactor, blendDst: THREE.OneFactor, blendSrcAlpha: THREE.OneFactor, blendDstAlpha: THREE.OneFactor,
+  });
+  private readonly present = new THREE.ShaderMaterial({ ...accumulateShader, uniforms: THREE.UniformsUtils.clone(accumulateShader.uniforms), depthTest: false, depthWrite: false, blending: THREE.NoBlending });
+  private readonly quad = new FullScreenQuad(this.accumulate);
+  /** Устройство в координатах группы pose: по нему ставится тень на фоне. */
   private bounds: THREE.Box3 | null = null;
   private readonly shadow = new BackdropShadow();
   private shadowOptions: ShadowOptions | null = null;
@@ -261,6 +334,7 @@ export class StudioScene {
     this.renderer.domElement.addEventListener("webglcontextlost", this.handleContextLost);
     this.host.appendChild(this.renderer.domElement);
     this.studio = new StudioLight(this.renderer);
+    this.device.add(this.pose);
     this.scene.add(this.device, this.shadow.plane);
     this.presetCanvas.width = 512;
     this.presetCanvas.height = 512;
@@ -270,6 +344,41 @@ export class StudioScene {
     this.screenTexture.colorSpace = THREE.SRGBColorSpace;
     this.screenTexture.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
     this.screenMaterial = new THREE.MeshBasicMaterial({ map: this.screenTexture, toneMapped: false });
+    // Манипулятор подписывается на указатель раньше камеры: захват ручки
+    // выключает вращение камеры до того, как оно успеет начаться.
+    this.gizmo = new TransformControls(this.camera, this.renderer.domElement);
+    this.gizmo.setSize(0.68);
+    // Спокойные оттенки сохраняют привычные цвета осей; активная ручка — охра.
+    this.gizmo.setColors("#bd8c89", "#8faa96", "#8fa9bf", "#d5b77c");
+    this.gizmo.showE = false;
+    this.gizmo.showXYZE = false;
+    const gizmoShape = this.gizmo.getHelper().children.find((child) => child instanceof TransformControlsGizmo);
+    if (gizmoShape instanceof TransformControlsGizmo) {
+      // У масштаба одна ручка X. Убираем второй конец и его захват,
+      // сохраняя штатную механику указателя и большие зоны попадания.
+      for (const group of [gizmoShape.gizmo.scale, gizmoShape.picker.scale]) {
+        for (const child of [...group.children]) {
+          if (!(child instanceof THREE.Mesh) || child.name !== "X") continue;
+          child.geometry.computeBoundingBox();
+          if (child.geometry.boundingBox!.getCenter(new THREE.Vector3()).x < -0.1) { group.remove(child); child.geometry.dispose(); }
+        }
+      }
+    }
+    this.gizmo.attach(this.pose);
+    this.gizmo.enabled = false;
+    this.gizmo.getHelper().visible = false;
+    this.overlay.add(this.gizmo.getHelper());
+    this.gizmo.addEventListener("change", () => { this.needsRender = true; });
+    this.gizmo.addEventListener("dragging-changed", (event) => { this.gizmoDragging = Boolean(event.value); this.syncControls(); });
+    this.gizmo.addEventListener("mouseDown", () => {
+      this.scaleStart = this.pose.scale.x;
+      this.callbacks.transform?.(this.readTransform(), "start");
+    });
+    this.gizmo.addEventListener("objectChange", this.handleGizmoChange);
+    this.gizmo.addEventListener("mouseUp", () => {
+      cancelAnimationFrame(this.transformFrame); this.transformFrame = 0;
+      this.callbacks.transform?.(this.readTransform(), "end");
+    });
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     this.controls.dampingFactor = 0.16;
@@ -296,6 +405,79 @@ export class StudioScene {
     event.preventDefault();
     this.callbacks.model({ status: "error", message: "Браузер прервал работу 3D. Нажмите «Повторить», чтобы восстановить сцену." });
   };
+
+  /**
+   * Ручка манипулятора двигается: масштаб держится равномерным, поворот
+   * разворачивается без скачков через ±180°, а значения уходят в панель раз
+   * в кадр, а не на каждое событие указателя.
+   */
+  private handleGizmoChange = () => {
+    if (this.gizmo.mode === "scale") {
+      const { x, y, z } = this.pose.scale;
+      const factor = [x, y, z].reduce((best, value) => Math.abs(value / this.scaleStart - 1) > Math.abs(best / this.scaleStart - 1) ? value : best, x);
+      this.pose.scale.setScalar(clamp(factor, 0.1, 4));
+    }
+    this.needsRender = true;
+    if (!this.transformFrame) this.transformFrame = requestAnimationFrame(() => {
+      this.transformFrame = 0;
+      if (this.gizmoDragging) this.callbacks.transform?.(this.readTransform(), "change");
+    });
+  };
+
+  /** Текущее положение группы в единицах настроек. */
+  private readTransform(): DeviceTransform {
+    const previous = this.settings.transform;
+    const degrees = (radians: number) => Math.round(THREE.MathUtils.radToDeg(radians) * 10) / 10;
+    const round = (value: number) => Math.round(value * 1000) / 1000;
+    return {
+      x: round(clamp(this.pose.position.x, -4, 4)), y: round(clamp(this.pose.position.y, -4, 4)), z: round(clamp(this.pose.position.z, -4, 4)),
+      rotX: unwrap(previous.rotX, degrees(this.pose.rotation.x)), rotY: unwrap(previous.rotY, degrees(this.pose.rotation.y)), rotZ: unwrap(previous.rotZ, degrees(this.pose.rotation.z)),
+      scale: Math.round(clamp(this.pose.scale.x, 0.1, 4) * 1000) / 10,
+    };
+  }
+
+  private applyTransform() {
+    const { x, y, z, rotX, rotY, rotZ, scale } = this.settings.transform;
+    this.pose.position.set(x, y, z);
+    this.pose.rotation.set(THREE.MathUtils.degToRad(rotX), THREE.MathUtils.degToRad(rotY), THREE.MathUtils.degToRad(rotZ), "XYZ");
+    this.pose.scale.setScalar(scale / 100);
+    this.needsRender = true;
+  }
+
+  /** Вращение камеры доступно, пока не взята ручка, нет руки и экспорта. */
+  private syncControls() {
+    this.controls.enabled = this.orbitAllowed && !this.gizmoDragging && !this.exporting;
+    this.gizmo.enabled = this.orbitAllowed && this.gizmoMode !== "none" && !this.exporting;
+    this.gizmo.getHelper().visible = this.gizmoMode !== "none";
+    this.needsRender = true;
+  }
+
+  /** Выбирает манипулятор: перемещение, вращение кольцами или масштаб. */
+  setGizmo(mode: GizmoMode) {
+    this.gizmoMode = mode;
+    if (mode !== "none") this.gizmo.setMode(mode);
+    this.gizmo.showX = true;
+    this.gizmo.showY = mode !== "scale";
+    this.gizmo.showZ = mode !== "scale";
+    // Перемещение и масштаб — в осях сцены, кольца — вокруг собственных осей устройства.
+    this.gizmo.setSpace(mode === "rotate" ? "local" : "world");
+    this.syncControls();
+  }
+
+  /** Привязка к шагу, пока зажат Shift: 15°, 5 % масштаба и 0,05 единицы сдвига. */
+  setSnap(enabled: boolean) {
+    this.gizmo.setRotationSnap(enabled ? THREE.MathUtils.degToRad(15) : null);
+    this.gizmo.setScaleSnap(enabled ? 0.05 : null);
+    this.gizmo.setTranslationSnap(enabled ? 0.05 : null);
+  }
+
+  /** Esc во время жеста возвращает устройство туда, где жест начался. */
+  cancelGesture(): boolean {
+    if (!this.gizmoDragging) return false;
+    this.gizmo.reset();
+    this.gizmo.pointerUp(null);
+    return true;
+  }
 
   private handleStart = () => { this.interacting = true; };
   private handleEnd = () => { this.interacting = false; this.publishCamera(); };
@@ -329,10 +511,74 @@ export class StudioScene {
     }
   };
 
-  /** Кадр целиком: сначала тень под текущий ракурс, затем сцена. */
-  private draw() {
-    this.shadow.update(this.renderer, this.scene, this.device, this.bounds, this.camera, this.shadowOptions);
+  /**
+   * Кадр целиком. Без размытия — один рендер. С размытием движения кадр
+   * складывается из подкадров вокруг текущего времени: каждый рендерится как
+   * обычно, копируется и усредняется, поэтому вид экрана, тон и прозрачность
+   * совпадают с обычным кадром. Пока камеру или устройство тянут руками,
+   * размытие не считается: подкадры спорили бы с жестом.
+   */
+  private draw(transparent = false) {
+    const { sample, blur, fps, time } = this.motion;
+    if (!sample || blur <= 0 || this.interacting || this.gizmoDragging || !this.model) { this.drawFrame(transparent); this.drawOverlay(); return; }
+    const count = this.exporting ? EXPORT_SAMPLES : this.motion.playing ? PLAYING_SAMPLES : PAUSED_SAMPLES;
+    const shutter = blur / Math.max(1, fps);
+    const poses = Array.from({ length: count }, (_, index) => sample(Math.max(0, time + (index / (count - 1) - 0.5) * shutter)));
+    const first = poses[0], last = poses[count - 1];
+    // Без движения в пределах затвора размытие ничего не меняет.
+    if (JSON.stringify([first.camera, first.transform]) === JSON.stringify([last.camera, last.transform])) { this.drawFrame(transparent); this.drawOverlay(); return; }
+    const size = this.renderer.getDrawingBufferSize(new THREE.Vector2());
+    if (!this.frameCopy || this.frameCopy.image.width !== size.x || this.frameCopy.image.height !== size.y) {
+      this.frameCopy?.dispose(); this.accumulator?.dispose();
+      this.frameCopy = new THREE.FramebufferTexture(size.x, size.y);
+      this.accumulator = new THREE.WebGLRenderTarget(size.x, size.y, { type: THREE.HalfFloatType, depthBuffer: false });
+    }
+    const saved = { camera: this.settings.camera, transform: this.settings.transform };
+    const clear = this.renderer.getClearColor(new THREE.Color()), alpha = this.renderer.getClearAlpha();
+    this.renderer.setRenderTarget(this.accumulator);
+    this.renderer.setClearColor(0x000000, 0);
+    this.renderer.clear();
+    this.renderer.setRenderTarget(null);
+    this.renderer.setClearColor(clear, alpha);
+    this.quad.material = this.accumulate;
+    this.accumulate.uniforms.map.value = this.frameCopy;
+    this.accumulate.uniforms.weight.value = 1 / count;
+    for (const pose of poses) {
+      this.applyMotionPose(pose);
+      this.drawFrame(transparent);
+      this.renderer.copyFramebufferToTexture(this.frameCopy);
+      // Накопитель не очищается между подкадрами: каждый добавляется к сумме.
+      this.renderer.setRenderTarget(this.accumulator);
+      this.renderer.autoClear = false;
+      this.quad.render(this.renderer);
+      this.renderer.autoClear = true;
+      this.renderer.setRenderTarget(null);
+    }
+    this.applyMotionPose({ ...this.settings, ...saved });
+    this.quad.material = this.present;
+    this.present.uniforms.map.value = this.accumulator!.texture;
+    this.quad.render(this.renderer);
+    this.drawOverlay();
+  }
+
+  /** Один рендер: сначала тень под текущий ракурс, затем сцена. */
+  private drawFrame(transparent: boolean) {
+    this.shadow.update(this.renderer, this.scene, this.pose, this.bounds, this.camera, this.shadowOptions);
+    // Прозрачный экспорт убирает только фон: тень сохраняет цвет, который
+    // дал бы ей фон, и остаётся в альфа-канале.
+    const background = this.scene.background;
+    if (transparent) this.scene.background = null;
     this.renderer.render(this.scene, this.camera);
+    this.scene.background = background;
+  }
+
+  /** Манипулятор поверх кадра; в экспорт он не попадает. */
+  private drawOverlay() {
+    if (this.exporting || this.gizmoMode === "none" || !this.model) return;
+    this.renderer.autoClear = false;
+    this.renderer.clearDepth();
+    this.renderer.render(this.overlay, this.camera);
+    this.renderer.autoClear = true;
   }
 
   /**
@@ -344,6 +590,13 @@ export class StudioScene {
     const now = performance.now();
     const elapsed = this.lastTick ? Math.min((now - this.lastTick) / 1000, 0.1) : 0;
     this.lastTick = now;
+    if (this.motion.timeline) {
+      // В анимации медиа идут по таймлайну: фон и видео подводятся к его времени.
+      this.syncMedia(this.motion.time, this.motion.playing);
+      if (this.backdropVideo && !this.backdropVideo.paused) this.needsRender = true;
+      if (this.screenVideo && !this.screenVideo.paused) this.drawScreen();
+      return;
+    }
     if (this.backgroundAnimated) {
       this.backgroundSeconds += elapsed * (this.settings.background.speed / 100);
       this.paintPreset();
@@ -469,6 +722,7 @@ export class StudioScene {
     const { projection, azimuth, elevation, distance, zoom, roll } = this.settings.camera;
     this.camera = projection === "perspective" ? this.perspective : this.orthographic;
     this.controls.object = this.camera;
+    this.gizmo.camera = this.camera;
     this.camera.position.setFromSphericalCoords(distance, THREE.MathUtils.degToRad(90 - elevation), THREE.MathUtils.degToRad(azimuth));
     this.camera.zoom = zoom / 100;
     this.camera.lookAt(0, 0, 0);
@@ -490,8 +744,9 @@ export class StudioScene {
     this.scene.environmentRotation.y = rotation;
     this.renderer.toneMappingExposure = light.exposure / 100;
     this.shadowOptions = shadow.enabled ? {
-      opacity: shadow.opacity / 100, softness: shadow.softness / 100, distance: shadow.distance / 100,
-      color: shadowColor(background), from: shadowDirection(light.preset).applyAxisAngle(new THREE.Vector3(0, 1, 0), rotation),
+      opacity: shadow.opacity / 100, softness: shadow.softness / 100, distance: shadow.distance / 100, length: shadow.length / 100,
+      color: shadow.tint === "custom" ? new THREE.Color(shadow.color) : shadowColor(background),
+      from: shadowDirection(light.preset).applyAxisAngle(new THREE.Vector3(0, 1, 0), rotation),
     } : null;
     this.backgroundTexture?.dispose();
     this.backgroundTexture = null;
@@ -540,6 +795,7 @@ export class StudioScene {
     const old = this.settings;
     this.settings = structuredClone(next);
     if (JSON.stringify(old.camera) !== JSON.stringify(next.camera)) this.applyCamera();
+    if (JSON.stringify(old.transform) !== JSON.stringify(next.transform) && !this.gizmoDragging) this.applyTransform();
     if (JSON.stringify(old.screen) !== JSON.stringify(next.screen)) this.drawScreen();
     if (JSON.stringify([old.light, old.shadow, old.background, old.screen.island, old.screen.reflection]) !== JSON.stringify([next.light, next.shadow, next.background, next.screen.island, next.screen.reflection])) this.applyEnvironment();
     if (JSON.stringify(old.video) !== JSON.stringify(next.video)) this.applyVideo();
@@ -548,7 +804,8 @@ export class StudioScene {
   }
 
   setInteractionEnabled(enabled: boolean) {
-    this.controls.enabled = enabled && !this.exporting;
+    this.orbitAllowed = enabled;
+    this.syncControls();
   }
 
   /**
@@ -616,10 +873,14 @@ export class StudioScene {
     this.releaseVideo();
     this.screenImage = null;
     this.screenVideo = video;
+    // После перемотки на паузе кадр видео меняется без воспроизведения: экран нужно перерисовать.
+    video.addEventListener("seeked", () => { if (this.screenVideo === video) this.drawScreen(); });
     video.playbackRate = clamp(this.settings.video.speed / 100, 0.25, 4);
     await seek(video, clamp(this.settings.video.start, 0, video.duration || 0));
     // Автозапуск со звуком браузер заблокирует; беззвучное видео пойдёт сразу.
-    await video.play().catch(() => undefined);
+    // В анимации видео не запускается само: им управляет таймлайн.
+    if (this.motion.timeline) this.syncMedia(this.motion.time, this.motion.playing);
+    else await video.play().catch(() => undefined);
     this.callbacks.video?.(!video.paused);
     this.drawScreen();
   }
@@ -873,7 +1134,7 @@ export class StudioScene {
         action.play();
       }
       if (this.model) {
-        this.device.remove(this.model);
+        this.pose.remove(this.model);
         // Материалы экрана общие для всех моделей; освобождаем только ресурсы старой модели.
         this.model.traverse((object) => { if (object instanceof THREE.Mesh && (object.material === this.screenMaterial || object.material === this.offMaterial)) object.material = new THREE.MeshBasicMaterial(); });
         disposeObject(this.model);
@@ -887,7 +1148,7 @@ export class StudioScene {
       this.screens = screens;
       this.screen = null;
       this.reflectionMaterial = reflectionMaterial;
-      this.device.add(replacement);
+      this.pose.add(replacement);
       this.applyPose();
       this.callbacks.model({ status: "ready" });
     } catch (error) {
@@ -895,94 +1156,255 @@ export class StudioScene {
     }
   }
 
-  async exportPNG(width: number, height: number): Promise<Blob> {
+  /** Снимает текущий кадр в PNG. transparent убирает фон только из результата. */
+  async exportPNG(width: number, height: number, options: { transparent?: boolean } = {}): Promise<Blob> {
     if (this.exporting || this.disposed) throw new Error("Дождитесь завершения экспорта.");
     if (Math.max(width, height) > this.renderer.capabilities.maxTextureSize) throw new Error("Видеокарта не поддерживает это разрешение. Выберите меньший размер.");
     this.exporting = true;
-    this.controls.enabled = false;
+    this.syncControls();
     const ratio = this.renderer.getPixelRatio();
     try {
       this.renderer.setPixelRatio(1);
       this.renderer.setSize(width, height, false);
       this.updateProjection(width, height);
-      this.draw();
-      return await new Promise<Blob>((resolve, reject) => {
-        this.renderer.domElement.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Не удалось создать PNG. Выберите меньшее разрешение.")), "image/png");
-      });
+      this.draw(options.transparent);
+      return await this.snapshot();
     } finally {
       this.renderer.setPixelRatio(ratio);
       this.exporting = false;
-      this.controls.enabled = true;
+      this.syncControls();
       this.resize();
     }
   }
 
+  private snapshot(): Promise<Blob> {
+    return new Promise<Blob>((resolve, reject) => {
+      this.renderer.domElement.toBlob((blob) => blob ? resolve(blob) : reject(new Error("Не удалось создать PNG. Выберите меньшее разрешение.")), "image/png");
+    });
+  }
+
+  /** Камера и положение устройства из кадра анимации, без публикации в панель. */
+  private applyMotionPose(settings: Settings) {
+    this.settings.camera = settings.camera;
+    this.settings.transform = settings.transform;
+    this.applyCamera();
+    this.applyTransform();
+  }
+
   /**
-   * Записывает ролик с экрана в WebM. Запись идёт в реальном времени через
-   * MediaRecorder: отрезок на пять секунд пишется пять секунд. Кадры снимаются
-   * с того же холста, что и PNG, поэтому картинка в ролике и в снимке
-   * совпадает. Звук исходного видео в ролик не попадает.
+   * Кадр анимации в момент time. exact — для покадрового экспорта: видео на
+   * экране и на фоне перематываются точно на нужный кадр, а не догоняются.
    */
-  async exportVideo(width: number, height: number, fps: number, onProgress?: (value: number) => void): Promise<Blob> {
-    const video = this.screenVideo;
-    if (!video) throw new Error("Сначала загрузите видео на экран.");
+  private async renderAt(time: number, transparent: boolean, exact: boolean) {
+    const sample = this.motion.sample;
+    if (sample) this.applyMotionPose(sample(time));
+    this.motion.time = time;
+    if (this.backgroundAnimated) { this.backgroundSeconds = time * (this.settings.background.speed / 100); this.paintPreset(); }
+    if (exact) {
+      if (this.screenVideo) await seek(this.screenVideo, this.screenVideoTime(time, this.screenVideo));
+      if (this.backdropVideo) { await seek(this.backdropVideo, this.backdropVideoTime(time, this.backdropVideo)); if (this.backdropTexture) this.backdropTexture.needsUpdate = true; }
+    }
+    this.drawScreen();
+    this.draw(transparent);
+  }
+
+  /**
+   * Экспорт анимации. Последовательность PNG считается покадрово и точно:
+   * каждый кадр рендерится в своё время, видео перематывается на него. WebM и
+   * MP4 пишутся через MediaRecorder в реальном времени: время кадра берётся
+   * по часам, поэтому при медленном рендере движение не замедляется, а
+   * теряет часть кадров. Прозрачность сохраняет только WebM.
+   */
+  async exportAnimation(options: {
+    width: number; height: number; fps: number; duration: number; transparent: boolean;
+    format: ExportFormat; sample: (time: number) => Settings; blur: number;
+    onProgress?: (value: number) => void; signal?: AbortSignal;
+    soundtrack?: ExportAudio;
+  }): Promise<Blob> {
+    const { width, height, fps, duration, transparent, format, signal } = options;
     if (this.exporting || this.disposed) throw new Error("Дождитесь завершения экспорта.");
-    const mimeType = recorderMime();
-    if (!mimeType || typeof this.renderer.domElement.captureStream !== "function") throw new Error("Браузер не умеет записывать видео. Попробуйте Chrome, Edge или Firefox.");
     if (Math.max(width, height) > this.renderer.capabilities.maxTextureSize) throw new Error("Видеокарта не поддерживает это разрешение. Выберите меньший размер.");
+    const mimeType = format === "png" ? null : recorderMime(format, Boolean(options.soundtrack));
+    if (format !== "png" && (!mimeType || typeof this.renderer.domElement.captureStream !== "function")) {
+      throw new Error(format === "mp4" ? "Браузер не умеет записывать MP4. Выберите WebM или последовательность PNG." : "Браузер не умеет записывать видео. Попробуйте Chrome, Edge или Firefox.");
+    }
+    const cancelled = () => new DOMException("Экспорт отменён.", "AbortError");
     this.exporting = true;
-    this.controls.enabled = false;
+    this.syncControls();
     const ratio = this.renderer.getPixelRatio();
-    const wasPlaying = !video.paused;
-    const seconds = this.backgroundSeconds;
+    const saved = { camera: this.settings.camera, transform: this.settings.transform, motion: { ...this.motion }, seconds: this.backgroundSeconds };
+    const screenVideo = this.screenVideo, backdropVideo = this.backdropVideo;
+    const wasPlaying = Boolean(screenVideo && !screenVideo.paused) && !saved.motion.timeline;
     try {
       this.renderer.setPixelRatio(1);
       this.renderer.setSize(width, height, false);
       this.updateProjection(width, height);
-      const duration = Number.isFinite(video.duration) ? video.duration : 0;
-      const start = clamp(this.settings.video.start, 0, Math.max(0, duration - 0.05));
-      const end = videoEnd(this.settings.video.end, duration);
-      video.pause();
-      video.playbackRate = clamp(this.settings.video.speed / 100, 0.25, 4);
-      await seek(video, start);
-      this.drawScreen();
-      this.draw();
-      const stream = this.renderer.domElement.captureStream(fps);
-      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: Math.round(width * height * fps * 0.14) });
+      this.motion = { ...this.motion, sample: options.sample, blur: options.blur, fps, timeline: true, playing: false };
+      screenVideo?.pause(); backdropVideo?.pause();
+      if (format === "png") {
+        const zip = new ZipWriter();
+        const frames = Math.max(1, Math.round(duration * fps));
+        for (let index = 0; index < frames; index++) {
+          if (signal?.aborted) throw cancelled();
+          await this.renderAt(index / fps, transparent, true);
+          await zip.add(`frame-${String(index + 1).padStart(5, "0")}.png`, await this.snapshot());
+          options.onProgress?.((index + 1) / frames);
+          // Отдаём кадр интерфейсу, чтобы прогресс и кнопка отмены оставались живыми.
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        return zip.finish();
+      }
+      await this.renderAt(0, transparent, true);
+      // Запись идёт с отдельного 2D-холста: каждый готовый кадр копируется в
+      // него и подаётся явно. Захват прямо с WebGL-холста зависит от того, как
+      // браузер выводит WebGL, и на части систем даёт пустые кадры; копия в
+      // 2D сохраняет и картинку, и альфа-канал.
+      const recording = document.createElement("canvas");
+      recording.width = width; recording.height = height;
+      const context = recording.getContext("2d");
+      if (!context) throw new Error("Браузер не умеет записывать видео. Попробуйте Chrome, Edge или Firefox.");
+      const stream = recording.captureStream(0);
+      options.soundtrack?.stream.getAudioTracks().forEach((audio) => stream.addTrack(audio));
+      const track = stream.getVideoTracks()[0] as CanvasCaptureMediaStreamTrack;
+      const capture = () => {
+        context.clearRect(0, 0, width, height);
+        context.drawImage(this.renderer.domElement, 0, 0, width, height);
+        track.requestFrame();
+      };
+      const recorder = new MediaRecorder(stream, { mimeType: mimeType!, videoBitsPerSecond: Math.round(width * height * fps * 0.16) });
       const chunks: Blob[] = [];
       recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
       const stopped = new Promise<void>((resolve) => { recorder.onstop = () => resolve(); });
+      if (screenVideo) { screenVideo.playbackRate = clamp(this.settings.video.speed / 100, 0.25, 4); await screenVideo.play().catch(() => undefined); }
+      if (backdropVideo) await backdropVideo.play().catch(() => undefined);
       recorder.start();
-      await video.play();
-      await new Promise<void>((resolve) => {
-        const step = () => {
-          if (this.disposed) { resolve(); return; }
-          this.drawScreen();
-          if (this.backgroundAnimated) {
-            this.backgroundSeconds += (1 / fps) * (this.settings.background.speed / 100);
-            this.paintPreset();
-          }
-          this.draw();
-          onProgress?.(clamp((video.currentTime - start) / Math.max(0.001, end - start), 0, 1));
-          if (video.ended || video.currentTime >= end - 0.02) { resolve(); return; }
+      options.soundtrack?.start();
+      capture();
+      const begin = performance.now();
+      let next = 1 / fps;
+      try {
+        await new Promise<void>((resolve, reject) => {
+          const step = () => {
+            if (this.disposed) { resolve(); return; }
+            if (signal?.aborted) { reject(cancelled()); return; }
+            const time = Math.min(duration, (performance.now() - begin) / 1000);
+            // Не чаще выбранной частоты: 24 кадра в секунду не превращаются в 60.
+            if (time >= next || time >= duration) {
+              this.syncMedia(time, true);
+              void this.renderAt(time, transparent, false);
+              capture();
+              next = Math.max(next + 1 / fps, time + 0.5 / fps);
+            }
+            options.onProgress?.(time / duration);
+            if (time >= duration) { resolve(); return; }
+            requestAnimationFrame(step);
+          };
           requestAnimationFrame(step);
-        };
-        requestAnimationFrame(step);
-      });
-      video.pause();
-      recorder.stop();
-      await stopped;
-      stream.getTracks().forEach((track) => track.stop());
+        });
+        // Последний кадр держится ещё один интервал: иначе ролик кончается раньше
+        // его показа и выходит короче выбранной длительности.
+        await new Promise((resolve) => setTimeout(resolve, 1000 / fps));
+        capture();
+        await new Promise((resolve) => setTimeout(resolve, 1000 / fps));
+      } finally {
+        if (recorder.state !== "inactive") recorder.stop();
+        await stopped;
+        stream.getTracks().forEach((track) => track.stop());
+      }
+      if (signal?.aborted) throw cancelled();
       if (!chunks.length) throw new Error("Запись не получилась. Попробуйте меньшее разрешение или частоту кадров.");
-      return new Blob(chunks, { type: mimeType });
+      return new Blob(chunks, { type: mimeType! });
     } finally {
-      this.backgroundSeconds = seconds;
+      this.motion = saved.motion;
+      this.backgroundSeconds = saved.seconds;
+      this.settings.camera = saved.camera;
+      this.settings.transform = saved.transform;
+      this.applyCamera();
+      this.applyTransform();
       this.renderer.setPixelRatio(ratio);
       this.exporting = false;
-      this.controls.enabled = true;
+      this.syncControls();
       this.resize();
-      if (wasPlaying) void video.play().catch(() => undefined);
-      this.callbacks.video?.(!video.paused);
+      if (this.motion.timeline) this.syncMedia(this.motion.time, this.motion.playing);
+      else if (wasPlaying) void screenVideo?.play().catch(() => undefined);
+      if (backdropVideo && !this.motion.timeline) void backdropVideo.play().catch(() => undefined);
+      this.callbacks.video?.(Boolean(this.screenVideo && !this.screenVideo.paused));
+      if (this.backgroundAnimated) this.paintPreset();
+      this.drawScreen();
+    }
+  }
+
+  /** Габариты устройства и центр активного экрана в координатах сцены — для готовых движений камеры. */
+  layout(): SceneLayout | null {
+    if (!this.model || !this.bounds || !this.screen) return null;
+    this.device.updateMatrixWorld(true);
+    const box = this.bounds.clone().applyMatrix4(this.pose.matrixWorld);
+    const size = box.getSize(new THREE.Vector3()), center = box.getCenter(new THREE.Vector3());
+    const screenBox = new THREE.Box3().setFromObject(this.screen.mesh);
+    const screenCenter = screenBox.getCenter(new THREE.Vector3()), screenSize = screenBox.getSize(new THREE.Vector3());
+    return {
+      size: [size.x, size.y, size.z], center: [center.x, center.y, center.z], screen: [screenCenter.x, screenCenter.y, screenCenter.z],
+      // У наклонённого экрана ноутбука высота складывается из проекций на Y и Z.
+      screenHeight: Math.max(0.2, Math.hypot(screenSize.y, screenSize.z * 0.5)),
+    };
+  }
+
+  /**
+   * Время анимации и правила для медиа. В режиме анимации видео на экране,
+   * видеофон и движение готового фона идут по таймлайну; в режиме
+   * изображения видео живёт своим воспроизведением, как раньше.
+   */
+  setMotion(next: { timeline: boolean; time: number; playing: boolean; sample: ((time: number) => Settings) | null; blur: number; fps?: number }) {
+    if (this.exporting) return;
+    const previous = this.motion;
+    const was = previous.timeline;
+    // Кадр перерисовывается, только если что-то видимое поменялось: панель
+    // присылает время при каждом своём обновлении, а лишний рендер на слабой
+    // видеокарте стоит дорого.
+    const changed = next.timeline !== previous.timeline || next.time !== previous.time || next.playing !== previous.playing || next.blur !== previous.blur || (next.blur > 0 && next.sample !== previous.sample);
+    this.motion = { ...previous, ...next, fps: next.fps ?? previous.fps };
+    if (next.timeline) this.syncMedia(next.time, next.playing);
+    else if (was) {
+      // Обратно в изображение: видео останавливается на текущем кадре, дальше им управляет панель экрана.
+      this.screenVideo?.pause();
+      this.callbacks.video?.(false);
+      if (this.backdropVideo?.paused) void this.backdropVideo.play().catch(() => undefined);
+    }
+    if (changed) this.needsRender = true;
+  }
+
+  private screenVideoTime(time: number, video: HTMLVideoElement) {
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
+    const start = clamp(this.settings.video.start, 0, Math.max(0, duration - 0.05));
+    const span = Math.max(0.05, videoEnd(this.settings.video.end, duration) - start);
+    const offset = time * clamp(this.settings.video.speed / 100, 0.25, 4);
+    // Без повтора видео встаёт на последнем кадре отрезка.
+    return start + (this.settings.video.loop ? offset % span : Math.min(offset, span - 0.02));
+  }
+
+  private backdropVideoTime(time: number, video: HTMLVideoElement) {
+    const duration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 1;
+    return time % duration;
+  }
+
+  /** Подводит видео к времени таймлайна: при воспроизведении — догоняет, на паузе — перематывает. */
+  private syncMedia(time: number, playing: boolean) {
+    const follow = (video: HTMLVideoElement | null, target: number, rate: number) => {
+      if (!video || video.readyState < 1) return;
+      if (playing) {
+        video.playbackRate = rate;
+        if (video.paused) void video.play().catch(() => undefined);
+        if (Math.abs(video.currentTime - target) > 0.15) video.currentTime = target;
+      } else {
+        if (!video.paused) video.pause();
+        if (!video.seeking && Math.abs(video.currentTime - target) > 0.02) video.currentTime = target;
+      }
+    };
+    if (this.screenVideo) follow(this.screenVideo, this.screenVideoTime(time, this.screenVideo), clamp(this.settings.video.speed / 100, 0.25, 4));
+    if (this.backdropVideo) follow(this.backdropVideo, this.backdropVideoTime(time, this.backdropVideo), 1);
+    if (this.backgroundAnimated) {
+      const seconds = time * (this.settings.background.speed / 100);
+      if (seconds !== this.backgroundSeconds) { this.backgroundSeconds = seconds; this.paintPreset(); this.needsRender = true; }
     }
   }
 
@@ -991,12 +1413,15 @@ export class StudioScene {
     this.modelRequest++; this.imageRequest++;
     cancelAnimationFrame(this.frame); cancelAnimationFrame(this.publishFrame);
     this.observer.disconnect();
+    cancelAnimationFrame(this.transformFrame);
     this.controls.dispose();
+    this.gizmo.dispose();
     this.renderer.domElement.removeEventListener("webglcontextlost", this.handleContextLost);
     if (this.model) disposeObject(this.model);
     this.screenMaterial.dispose(); this.offMaterial.dispose(); this.screenTexture.dispose();
     this.releaseVideo(); this.releaseBackdrop();
     this.backgroundTexture?.dispose(); this.presetTexture?.dispose(); this.studio.dispose(); this.shadow.dispose();
+    this.frameCopy?.dispose(); this.accumulator?.dispose(); this.accumulate.dispose(); this.present.dispose(); this.quad.dispose();
     this.renderer.dispose();
     this.renderer.domElement.remove();
   }
