@@ -506,22 +506,9 @@ svg { flex-shrink: 0; }
 .ease-row-label, .ease-column { color: var(--fg-muted); font-size: 10px; text-align: center; }
 .ease-row-label { text-align: left; }
 .ease-table .ease-option > span { display: none; }
-.move-list { display: grid; gap: 6px; }
 .canvas-choices { display: flex; align-items: center; gap: var(--space-sm); }
-.camera-moves { position: relative; font-size: var(--fs-caption); }
-.camera-moves > summary { display: flex; align-items: center; gap: 6px; height: 32px; padding-inline: 10px; border-radius: var(--radius-md); background: var(--surface-3); cursor: pointer; list-style: none; }
-.camera-moves > summary::-webkit-details-marker { display: none; }
-.camera-moves[open] > summary { background: var(--selected); }
-.camera-moves-menu { position: absolute; top: calc(100% + 8px); left: 0; width: 288px; max-height: min(460px, 60dvh); overflow: auto; scrollbar-width: thin; padding: var(--space-md); border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--panel); box-shadow: var(--shadow-4); }
-.move-card { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; padding: 9px 10px; border-radius: var(--radius-md); background: var(--panel-raised); text-align: left; }
-.move-card > strong { font-weight: 550; font-size: var(--fs-caption); }
-.move-card > span { color: var(--fg-muted); font-size: var(--fs-micro); }
-.move-preview { padding: 10px; border-radius: var(--radius-md); background: var(--panel-raised); }
-.move-preview-title { display: flex; align-items: center; gap: 6px; margin-block-end: var(--space-md); font-weight: 550; font-size: var(--fs-caption); }
-.move-preview-title > .quiet-icon { margin-inline-start: auto; }
-.move-preview > .light-description { margin-block-start: var(--space-sm); }
 @media (hover: hover) and (pointer: fine) {
-  .ease-option:hover:not(.selected), .move-card:hover { background: var(--panel-hover); color: var(--fg); }
+  .ease-option:hover:not(.selected) { background: var(--panel-hover); color: var(--fg); }
 }
 
 /* Окно «Экспорт анимации». */
@@ -553,7 +540,6 @@ svg { flex-shrink: 0; }
   .mode-switch.segmented button { min-width: 0; padding-inline: 8px; }
   .workspace-center { top: 44px; }
   .canvas-choices { align-items: flex-start; flex-direction: column; gap: 6px; }
-  .camera-moves-menu { left: 0; max-height: 42dvh; width: min(288px, calc(100vw - 32px)); }
   .timeline { height: 180px; }
   .timeline-zoom > span { display: none; }
   .timeline-zoom > input { width: 80px; }

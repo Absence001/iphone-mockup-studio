@@ -13,7 +13,6 @@ import { Viewport, type ModelState, type NavigationCommand } from "./viewport";
 import { Timeline, seconds, type Selection } from "./timeline";
 import { selectedKeys, setSelectionEase, validSegment } from "@/lib/timeline-selection";
 import { AnimationSection } from "./animation-section";
-import { CameraMovesControls, type MovePreview } from "./camera-moves-controls";
 import { AudioSection } from "./audio-section";
 import { LightingSection } from "./lighting-section";
 import { TimelineAudio, normalizeAudio, type AudioClip, type ExportAudio } from "@/lib/audio";
@@ -148,8 +147,8 @@ export function Studio() {
   const [audioLoading, setAudioLoading] = useState(false);
   const [decodedAudio, setDecodedAudio] = useState<{ url: string; buffer: AudioBuffer } | null>(null);
   const audioBuffer = decodedAudio?.url === audio?.url ? decodedAudio?.buffer ?? null : null;
-  /** Готовое движение камеры, которое пока только показывается. */
-  const [preview, setPreview] = useState<(MovePreview & { start: number; animation: Animation; settings: Settings }) | null>(null);
+  /** Выбранные готовые движения и документ до каждого: по ним список узнаёт движение и после отмены или повтора. */
+  const [appliedMoves, setAppliedMoves] = useState<{ id: CameraMoveId; start: number; before: Animation; projection: CameraSettings["projection"]; after: Animation }[]>([]);
   const [exportOptions, setExportOptions] = useState<ExportOptions>({ format: "webm", transparent: false, fps: 30 });
   const [exportProgress, setExportProgress] = useState<number | null>(null);
   const [formats, setFormats] = useState<Record<"webm" | "mp4", boolean>>({ webm: false, mp4: false });
@@ -161,12 +160,10 @@ export function Studio() {
   const clockSnapshot = useSyncExternalStore(clock.subscribe, clock.snapshot, () => "0:0");
   const clockPlaying = clockSnapshot.startsWith("1");
   const time = Number(clockSnapshot.split(":")[1]);
-  const documentAnimation = history.present.animation;
-  const animation = preview?.animation ?? documentAnimation;
-  const baseSettings = preview?.settings ?? settings;
+  const animation = history.present.animation;
   const animated = hasKeys(animation);
   /** Что показывает сцена: настройки с ключами анимации в текущем времени. */
-  const effective = useMemo(() => animated ? evaluate(baseSettings, animation, time) : baseSettings, [animated, baseSettings, animation, time]);
+  const effective = useMemo(() => animated ? evaluate(settings, animation, time) : settings, [animated, settings, animation, time]);
 
   const size = exportSize(settings.aspect, settings.resolution);
   const model = deviceModel(settings.device);
@@ -222,7 +219,6 @@ export function Studio() {
   const edit = useCallback((group: "camera" | "transform", patch: Record<string, number | string>, historyGroup?: string) => {
     const at = clock.time;
     const animating = modeRef.current === "animation";
-    setPreview(null);
     mutate((current) => {
       let { settings: nextSettings, animation: nextAnimation } = current;
       const now = evaluate(nextSettings, nextAnimation, at);
@@ -278,7 +274,6 @@ export function Studio() {
 
   const switchMode = useCallback((next: Mode) => {
     clock.pause();
-    setPreview(null);
     if (next === "image") setSelection(null);
     setMode(next);
   }, [clock]);
@@ -296,7 +291,6 @@ export function Studio() {
   /** Ключ объекта: текущее положение всех свойств камеры или устройства. */
   const objectKey = useCallback((object: AnimatedObject) => {
     const at = clock.time;
-    setPreview(null);
     mutate((current) => {
       const now = evaluate(current.settings, current.animation, at);
       return { ...current, animation: objectTracks(object).reduce((next, track) => setKey(next, track, at, baseValue(now, track)), current.animation) };
@@ -354,39 +348,44 @@ export function Studio() {
     setReveal({ section: next === "scene" ? "background" : next === "animation" ? "animation" : next, token: Date.now() });
   };
 
-  /** Готовое движение камеры: сначала просмотр, применение — отдельным действием. */
-  const previewMove = useCallback((id: CameraMoveId, length?: number) => {
+  /**
+   * Готовое движение камеры применяется сразу при выборе. Смена движения
+   * пересчитывает его от документа до прошлого выбора, «Без движения» убирает
+   * ключи камеры. После ручной правки ключей список показывает «Своё движение».
+   */
+  const currentMove = appliedMoves.findLast((item) => item.after === animation) ?? null;
+  const moveValue = currentMove ? currentMove.id : objectTracks("camera").some((track) => isAnimated(animation, track)) ? "" : "none";
+  const chooseMove = useCallback((id: string) => {
+    const base = currentMove?.before ?? animation;
+    const projection = currentMove?.projection ?? settings.camera.projection;
+    setSelection(null);
+    if (id === "none") {
+      const tracks = { ...base.tracks };
+      for (const track of objectTracks("camera")) delete tracks[track];
+      mutate((current) => ({ ...current, settings: { ...current.settings, camera: { ...current.settings.camera, projection } }, animation: { ...base, tracks } }));
+      clock.pause();
+      return;
+    }
     const layout = sceneRef.current?.layout();
     const move = CAMERA_MOVES.find((item) => item.id === id);
     if (!move) return;
     if (!layout) { showError("Модель ещё загружается. Попробуйте через пару секунд."); return; }
-    const duration = length ?? (preview?.move === id ? preview.duration : move.duration);
-    const start = preview?.move === id ? preview.start : clock.time >= documentAnimation.duration - TIME_STEP ? 0 : clock.time;
-    const previewSettings = { ...settings, camera: { ...settings.camera, projection: "perspective" as const } };
-    const next = applyCameraMove(documentAnimation, move, layout, aspectRatio(settings.aspect), start, duration);
-    setSelection(null);
-    setPreview({ move: id, duration, start, animation: next, settings: previewSettings });
+    const start = currentMove?.start ?? (clock.time >= animation.duration - TIME_STEP ? 0 : clock.time);
+    const next = applyCameraMove(base, move, layout, aspectRatio(settings.aspect), start);
+    mutate((current) => ({ ...current, settings: { ...current.settings, camera: { ...current.settings.camera, projection: "perspective" } }, animation: next }));
+    setAppliedMoves((list) => [...list.slice(-79), { id: move.id, start, before: base, projection, after: next }]);
+    setActivePreset("");
+    if (projection !== "perspective") showToast("Камера переключена на перспективу");
     clock.duration = next.duration;
     clock.seek(start);
     clock.play();
-  }, [clock, documentAnimation, preview, settings, showError]);
-
-  const applyPreview = useCallback(() => {
-    if (!preview) return;
-    const switched = settings.camera.projection !== "perspective";
-    mutate((current) => ({ ...current, settings: { ...current.settings, camera: { ...current.settings.camera, projection: "perspective" } }, animation: preview.animation }));
-    setPreview(null);
-    setActivePreset("");
-    showToast(switched ? "Движение применено. Камера переключена на перспективу" : "Движение применено");
-  }, [mutate, preview, settings.camera.projection, showToast]);
-
-  const cancelPreview = useCallback(() => { setPreview(null); clock.pause(); }, [clock]);
+  }, [animation, clock, currentMove, mutate, settings.aspect, settings.camera.projection, showError, showToast]);
 
   // Сцена узнаёт время, воспроизведение и источник подкадров для размытия.
   useEffect(() => {
     const blur = animation.blur.enabled ? animation.blur.amount / 100 : 0;
-    sceneRef.current?.setMotion({ timeline: mode === "animation", time, playing: clockPlaying, sample: blur > 0 ? (at) => evaluate(baseSettings, animation, at) : null, blur, fps: exportOptions.fps });
-  }, [mode, time, clockPlaying, baseSettings, animation, exportOptions.fps, modelState.status]);
+    sceneRef.current?.setMotion({ timeline: mode === "animation", time, playing: clockPlaying, sample: blur > 0 ? (at) => evaluate(settings, animation, at) : null, blur, fps: exportOptions.fps });
+  }, [mode, time, clockPlaying, settings, animation, exportOptions.fps, modelState.status]);
 
   /* ---------- Файлы ---------- */
 
@@ -567,7 +566,6 @@ export function Studio() {
   const openExport = useCallback(() => {
     if (busy || modelState.status !== "ready") return;
     clock.pause();
-    setPreview(null);
     setExportOptions((current) => ({ ...current, transparent: current.transparent || settings.background.mode === "transparent" }));
     exportRef.current?.showModal();
   }, [busy, clock, modelState.status, settings.background.mode]);
@@ -583,22 +581,22 @@ export function Studio() {
     try {
       if (audio && !audio.muted && format !== "png") {
         if (!audioBuffer) throw new Error("Аудио ещё загружается. Попробуйте экспорт через пару секунд.");
-        soundtrack = await audioEngine.forExport(audio, audioBuffer, documentAnimation.duration);
+        soundtrack = await audioEngine.forExport(audio, audioBuffer, animation.duration);
       }
       const blob = await scene.exportAnimation({
-        width: size.width, height: size.height, fps, duration: documentAnimation.duration, transparent: transparent && format !== "mp4", format,
-        sample: (at) => evaluate(settings, documentAnimation, at), blur: documentAnimation.blur.enabled ? documentAnimation.blur.amount / 100 : 0,
+        width: size.width, height: size.height, fps, duration: animation.duration, transparent: transparent && format !== "mp4", format,
+        sample: (at) => evaluate(settings, animation, at), blur: animation.blur.enabled ? animation.blur.amount / 100 : 0,
         onProgress: setExportProgress, signal: controller.signal, soundtrack,
       });
       download(blob, `${fileName}-${size.width}x${size.height}.${format === "png" ? "zip" : format}`);
       trackAnalyticsEvent("mockup_export_video");
       exportRef.current?.close();
-      showToast(format === "png" ? `Кадры сохранены · ${Math.round(documentAnimation.duration * fps)} PNG в архиве` : `Ролик сохранён · ${size.width} × ${size.height}`);
+      showToast(format === "png" ? `Кадры сохранены · ${Math.round(animation.duration * fps)} PNG в архиве` : `Ролик сохранён · ${size.width} × ${size.height}`);
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") showToast("Экспорт остановлен");
       else showError(error instanceof Error ? error.message : "Не удалось записать ролик. Попробуйте меньшее разрешение.");
     } finally { soundtrack?.dispose(); setBusy(false); setExportProgress(null); abortRef.current = null; }
-  }, [audio, audioBuffer, audioEngine, busy, clock, documentAnimation, exportOptions, fileName, settings, showError, showToast, size.height, size.width]);
+  }, [audio, audioBuffer, audioEngine, busy, clock, animation, exportOptions, fileName, settings, showError, showToast, size.height, size.width]);
 
   const saveProject = useCallback(async () => {
     try {
@@ -623,12 +621,11 @@ export function Studio() {
       if (modifier && key === "KeyO") { event.preventDefault(); fileRef.current?.click(); return; }
       if (modifier && event.shiftKey && key === "KeyE") { event.preventDefault(); primaryExport(); return; }
       if (!busy && !textEditing && modifier && (key === "KeyZ" || key === "KeyY")) {
-        event.preventDefault(); dispatch({ type: key === "KeyY" || event.shiftKey ? "redo" : "undo" }); setActivePreset(""); setPreview(null); return;
+        event.preventDefault(); dispatch({ type: key === "KeyY" || event.shiftKey ? "redo" : "undo" }); setActivePreset(""); return;
       }
       if (input || busy) return;
       if (key === "Escape") {
         if (sceneRef.current?.cancelGesture()) { event.preventDefault(); return; }
-        if (preview) { cancelPreview(); return; }
         if (activeSelection) { setSelection(null); return; }
         navigate("orbit"); return;
       }
@@ -655,7 +652,7 @@ export function Studio() {
     };
     window.addEventListener("keydown", handleKey);
     return () => window.removeEventListener("keydown", handleKey);
-  }, [activeSelection, animation.duration, busy, camera, cancelPreview, deleteKeys, effective.camera, mode, navigate, preview, primaryExport, saveProject, seek]);
+  }, [activeSelection, animation.duration, busy, camera, deleteKeys, effective.camera, mode, navigate, primaryExport, saveProject, seek]);
 
   useEffect(() => {
     const handlePaste = (event: ClipboardEvent) => {
@@ -700,9 +697,9 @@ export function Studio() {
       <section className="stage-column" aria-label="Сцена">
         <Viewport settings={effective} image={image} backdrop={backdrop} sceneRef={sceneRef} onCamera={onCamera} onTransform={onTransform} onModel={setModelState} onScreen={setScreenSize} onError={showError} onVideo={onVideo} modelState={modelState} navigation={navigation} onResetCamera={resetCamera} onDropFile={(file) => void openFile(file)} busy={busy}
           onSpaceTap={mode === "animation" ? togglePlay : undefined}
-          topLeft={<div className="canvas-choices"><FluidChoice label="Ракурс" value={activePreset} placeholder="Свой ракурс" icon={Camera} className="preset-choice" disabled={busy} items={presets.map((preset) => ({ id: preset.id, label: preset.name }))} onChange={(id) => { const preset = presets.find((item) => item.id === id); if (preset) { camera({ ...preset.camera }); setActivePreset(id); } }} />{mode === "animation" && <CameraMovesControls preview={preview} disabled={busy} onPreview={previewMove} onApply={applyPreview} onCancel={cancelPreview} />}</div>}
+          topLeft={<div className="canvas-choices"><FluidChoice label="Ракурс" value={activePreset} placeholder="Свой ракурс" icon={Camera} className="preset-choice" disabled={busy} items={presets.map((preset) => ({ id: preset.id, label: preset.name }))} onChange={(id) => { const preset = presets.find((item) => item.id === id); if (preset) { camera({ ...preset.camera }); setActivePreset(id); } }} />{mode === "animation" && <FluidChoice label="Движение камеры" value={moveValue} placeholder="Своё движение" icon={Film} className="preset-choice" disabled={busy} items={[{ id: "none", label: "Без движения" }, ...CAMERA_MOVES.map((move) => ({ id: move.id, label: move.name, hint: move.description }))]} onChange={chooseMove} />}</div>}
           topCenter={<Segmented className="segmented mode-switch" label="Режим" value={mode} disabled={busy} items={[{ id: "image", label: "Изображение" }, { id: "animation", label: "Анимация" }]} onChange={switchMode} />}
-          topRight={<div className="header-actions"><Button variant="ghost" size="icon-compact" aria-label="Отменить (Ctrl+Z)" title="Отменить · Ctrl+Z" disabled={!history.past.length || busy} onClick={() => { dispatch({ type: "undo" }); setActivePreset(""); setPreview(null); }}><Undo2 /></Button><Button variant="ghost" size="icon-compact" aria-label="Повторить (Ctrl+Shift+Z)" title="Повторить · Ctrl+Shift+Z" disabled={!history.future.length || busy} onClick={() => { dispatch({ type: "redo" }); setPreview(null); }}><Redo2 /></Button><span className="toolbar-divider" /><Button variant="ghost" size="icon-compact" aria-label="Сохранить проект (Ctrl+S)" title="Сохранить проект · Ctrl+S" onClick={() => void saveProject()}><Save /></Button><ThemeToggle /><Button variant="ghost" size="icon-compact" aria-label="Горячие клавиши" title="Горячие клавиши · ?" onClick={() => helpRef.current?.showModal()}><CircleHelp /></Button></div>} />
+          topRight={<div className="header-actions"><Button variant="ghost" size="icon-compact" aria-label="Отменить (Ctrl+Z)" title="Отменить · Ctrl+Z" disabled={!history.past.length || busy} onClick={() => { dispatch({ type: "undo" }); setActivePreset(""); }}><Undo2 /></Button><Button variant="ghost" size="icon-compact" aria-label="Повторить (Ctrl+Shift+Z)" title="Повторить · Ctrl+Shift+Z" disabled={!history.future.length || busy} onClick={() => { dispatch({ type: "redo" }); }}><Redo2 /></Button><span className="toolbar-divider" /><Button variant="ghost" size="icon-compact" aria-label="Сохранить проект (Ctrl+S)" title="Сохранить проект · Ctrl+S" onClick={() => void saveProject()}><Save /></Button><ThemeToggle /><Button variant="ghost" size="icon-compact" aria-label="Горячие клавиши" title="Горячие клавиши · ?" onClick={() => helpRef.current?.showModal()}><CircleHelp /></Button></div>} />
         {mode === "animation" && <Timeline animation={animation} clock={clock} selection={activeSelection} deviceName={model.name}
           audio={audio} audioBuffer={audioBuffer} onAddAudio={() => audioInput.current?.click()} onAudioChange={moveAudio}
           onSelect={select} onSeek={seek} onTogglePlay={togglePlay} onLoop={(loop) => { clock.loop = loop; }}
@@ -848,7 +845,7 @@ export function Studio() {
     {pagePick && <PagePicker key={pagePick.url} preview={pagePick} onCancel={() => closePagePick()} onConfirm={(scrollY) => closePagePick(scrollY)} />}
     <ExportDialog ref={exportRef} options={exportOptions} onOptions={setExportOptions} aspect={settings.aspect} resolution={settings.resolution} size={size} audio={Boolean(audio && !audio.muted)}
       onAspect={(aspect) => change("aspect", aspect)} onResolution={(resolution) => change("resolution", resolution)}
-      duration={documentAnimation.duration} blur={documentAnimation.blur} supported={formats} progress={exportProgress}
+      duration={animation.duration} blur={animation.blur} supported={formats} progress={exportProgress}
       onExport={() => void exportAnimation()} onCancel={() => abortRef.current?.abort()} onClose={() => exportRef.current?.close()} />
     <dialog ref={helpRef} className="help-dialog"><div className="dialog-heading"><span className="dialog-icon"><Layers2 size={22} /></span><button className="icon-button" aria-label="Закрыть справку" onClick={() => helpRef.current?.close()}><X size={18} /></button></div><h2>Привычные движения.</h2><p>Всё нужное — под рукой.</p><dl className="shortcut-list">{[["Вращать камеру", "Перетаскивание / стрелки"], ["Перемещение, вращение, масштаб устройства", "W / E / R"], ["Камера / рука", "V / H"], ["Перемещать рабочую область", "Space + drag / средняя кнопка"], ["Масштаб под курсором", "Ctrl + колёсико"], ["Уместить кадр", "Shift + 1 / F"], ["Масштаб 100%", "0"], ["Отменить / повторить", "Ctrl + Z / Ctrl + Shift + Z"], ["Открыть экран или проект", "Ctrl + O"], ["Вставить картинку или ссылку", "Ctrl + V"], ["Сохранить проект", "Ctrl + S"], ["Скопировать PNG / экспорт анимации", "Ctrl + Shift + E"], ["Пуск и пауза анимации", "Space"], ["Курсор к ключу", "Shift при перетаскивании"], ["Удалить ключ", "Delete"]].map(([name, shortcut]) => <div key={name}><dt>{name}</dt><dd>{shortcut}</dd></div>)}</dl><p className="help-note">Масштаб рабочей области не влияет на экспорт. На Mac используйте ⌘ вместо Ctrl. Все файлы обрабатываются на вашем компьютере.</p><details className="model-credits"><summary>Авторы 3D-моделей</summary><p>iPhone 15 Pro и 15 Pro Max, Pro Display XDR, Apple Watch Ultra 2 и Series 9 — polyman, CC BY 4.0. iPhone 18 Pro, 18 Pro Max и iPhone Duo — extraakash, Sketchfab Standard. iPhone 17 Pro и 17 Pro Max, iPad Pro 13″ и MacBook Pro 14″ — Apple User, Sketchfab Standard. MacBook Air 13″ и iMac 24″ — valentinomyhero, CC BY 4.0. Galaxy S26 Ultra — gadirovsaid7, CC BY 4.0. Модели взяты с Sketchfab; названия соответствуют метаданным файлов.</p></details><button className="small-button reset-project" onClick={() => { mutate(() => structuredClone(INITIAL_DOCUMENT)); setActivePreset("front"); helpRef.current?.close(); showToast("Сцена сброшена. Изменение можно отменить."); }}><RotateCcw size={14} /> Сбросить всю сцену</button></dialog>
   </main></MotionConfig>;

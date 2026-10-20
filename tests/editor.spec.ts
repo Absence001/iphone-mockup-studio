@@ -161,19 +161,34 @@ test("анимация: автоключи, кривая участка, Shift-�
   expect(errors).toEqual([]);
 });
 
-test("движение камеры: просмотр, применение и отмена одним шагом", async ({ page }) => {
+test("движение камеры: выбор из списка, смена и отмена одним шагом", async ({ page }) => {
   await start(page);
   await page.getByRole("button", { name: "Анимация", exact: true }).click();
-  await page.getByLabel("Движения камеры", { exact: true }).click();
-  await page.getByRole("button", { name: /Отъезд от экрана/ }).click();
-  await expect(page.getByRole("button", { name: "Применить", exact: true })).toBeVisible();
-  // Просмотр не меняет документ: отменять пока нечего.
-  await expect(page.getByRole("button", { name: "Отменить (Ctrl+Z)" })).toBeDisabled();
-  await page.getByRole("button", { name: "Применить", exact: true }).click();
-  await expect(page.locator(".toast")).toContainText("Движение применено");
+  const moves = page.getByRole("combobox", { name: "Движение камеры", exact: true });
+  await expect(moves).toContainText("Без движения");
+  await moves.click();
+  // Список длиннее окна: последнее движение доступно прокруткой.
+  await page.getByRole("option", { name: "Акцент с поворотом", exact: true }).scrollIntoViewIfNeeded();
+  await page.getByRole("option", { name: "Отъезд от экрана", exact: true }).click();
+  await expect(page.locator(".toast")).toContainText("Камера переключена на перспективу");
+  await expect(moves).toContainText("Отъезд от экрана");
   await expect(page.locator(".timeline-row.object .timeline-key")).toHaveCount(2);
   await openSection(page, "Камера");
   await expect(page.getByRole("button", { name: "Перспектива", exact: true })).toHaveAttribute("aria-pressed", "true");
+  // Другое движение заменяет прежнее, а не добавляется к нему.
+  await moves.click();
+  await expect(page.getByRole("option", { name: "Отъезд от экрана", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("option", { name: "Акцент на экране", exact: true }).click();
+  await expect(moves).toContainText("Акцент на экране");
+  await expect(page.locator(".timeline-row.object .timeline-key")).toHaveCount(3);
+  await moves.click();
+  await page.getByRole("option", { name: "Без движения", exact: true }).click();
+  await expect(moves).toContainText("Без движения");
+  await expect(page.locator(".timeline-key")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Ортография", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await page.keyboard.press("Control+z");
+  await expect(moves).toContainText("Акцент на экране");
+  await page.keyboard.press("Control+z");
   await page.keyboard.press("Control+z");
   await expect(page.locator(".timeline-key")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Ортография", exact: true })).toHaveAttribute("aria-pressed", "true");

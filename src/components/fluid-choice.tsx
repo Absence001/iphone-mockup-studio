@@ -4,13 +4,13 @@ import { Fragment } from "react";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger } from "./ui/select";
 import type { IconComponent } from "@/lib/icon-context";
 
-export interface ChoiceItem { id: string; label: string; color?: string; group?: string }
+export interface ChoiceItem { id: string; label: string; color?: string; group?: string; hint?: string }
 
 export function FluidChoice({ label, value, items, onChange, disabled, placeholder, icon, className }: {
   label: string; value: string; items: ChoiceItem[]; onChange: (value: string) => void;
   disabled?: boolean; placeholder?: string; icon?: IconComponent; className?: string;
 }) {
-  const row = (item: ChoiceItem) => <SelectItem key={item.id} index={items.indexOf(item)} value={item.id}>
+  const row = (item: ChoiceItem) => <SelectItem key={item.id} index={items.indexOf(item)} value={item.id} title={item.hint}>
     {item.color ? <span className="finish-choice"><span style={{ background: item.color }} aria-hidden="true" />{item.label}</span> : item.label}
   </SelectItem>;
   // Порядок групп — порядок первого появления; индексы строк сквозные, их
