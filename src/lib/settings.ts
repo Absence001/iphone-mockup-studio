@@ -17,6 +17,12 @@ export const LID_DEFAULT = 110;
 export const LID_MAX = 135;
 export const BACKGROUND_MODES: readonly BackgroundMode[] = ["solid", "gradient", "preset", "custom", "transparent"];
 
+/** Готовые варианты тени; «custom» — значения, изменённые вручную. */
+export type ShadowPreset = "soft" | "contact" | "floating" | "long" | "hard" | "custom";
+export const SHADOW_PRESETS: readonly ShadowPreset[] = ["soft", "contact", "floating", "long", "hard", "custom"];
+/** Откуда берётся цвет тени: тёмный оттенок фона или свой цвет. */
+export type ShadowTint = "background" | "custom";
+
 /** Что лежит на экране устройства. */
 export type ScreenKind = "image" | "video";
 
@@ -31,6 +37,27 @@ export interface CameraSettings {
   offsetX: number;
   offsetY: number;
 }
+
+/**
+ * Положение устройства в сцене: сдвиг в единицах сцены от центра, поворот
+ * в градусах вокруг собственного центра и равномерный масштаб в процентах.
+ * Крен камеры применяется поверх и остаётся настройкой камеры.
+ */
+export interface DeviceTransform { x: number; y: number; z: number; rotX: number; rotY: number; rotZ: number; scale: number }
+
+export const DEFAULT_TRANSFORM: DeviceTransform = { x: 0, y: 0, z: 0, rotX: 0, rotY: 0, rotZ: 0, scale: 100 };
+
+/** Тень без включения и пресета: то, что меняют ползунки. */
+export type ShadowShape = { opacity: number; softness: number; distance: number; length: number };
+
+/** Значения готовых теней. «Мягкая» совпадает с тенью до появления пресетов. */
+export const SHADOW_VALUES: Record<Exclude<ShadowPreset, "custom">, ShadowShape> = {
+  soft: { opacity: 35, softness: 50, distance: 30, length: 35 },
+  contact: { opacity: 55, softness: 22, distance: 4, length: 18 },
+  floating: { opacity: 24, softness: 85, distance: 75, length: 30 },
+  long: { opacity: 30, softness: 60, distance: 45, length: 85 },
+  hard: { opacity: 45, softness: 6, distance: 22, length: 40 },
+};
 
 export interface Settings {
   device: Device;
@@ -53,8 +80,12 @@ export interface Settings {
   /** Воспроизведение видео на экране; к изображениям не применяется. */
   video: { loop: boolean; speed: number; start: number; end: number; muted: boolean };
   light: { preset: Lighting; intensity: number; exposure: number; rotation: number };
-  /** Тень на фоне позади устройства; величины в процентах. */
-  shadow: { enabled: boolean; opacity: number; softness: number; distance: number };
+  /**
+   * Тень на фоне позади устройства; величины в процентах. Длина — насколько
+   * свет отклонён от оси камеры: чем больше, тем дальше тень уходит вбок.
+   */
+  shadow: ShadowShape & { enabled: boolean; preset: ShadowPreset; tint: ShadowTint; color: string };
+  transform: DeviceTransform;
   aspect: Aspect;
   resolution: number;
 }
@@ -87,7 +118,8 @@ export const DEFAULT_SETTINGS: Settings = {
   // после загрузки.
   video: { loop: true, speed: 100, start: 0, end: 0, muted: true },
   light: { preset: "soft", intensity: 100, exposure: 100, rotation: 0 },
-  shadow: { enabled: true, opacity: 35, softness: 50, distance: 30 },
+  shadow: { enabled: true, preset: "soft", ...SHADOW_VALUES.soft, tint: "background", color: "#000000" },
+  transform: { ...DEFAULT_TRANSFORM },
   aspect: "4:3", resolution: 2400,
 };
 

@@ -1,4 +1,6 @@
 import { DEFAULT_SETTINGS, type ScreenKind, type Settings } from "./settings";
+import { EMPTY_ANIMATION, type Animation } from "./animation";
+import type { AudioClip } from "./audio";
 
 export interface ScreenImage {
   url: string; name: string; width: number; height: number; demo: boolean;
@@ -13,6 +15,9 @@ export interface DocumentState {
   image: ScreenImage;
   /** Своё фото или видео позади устройства; demo означает «не загружено». */
   backdrop: ScreenImage;
+  /** Ключи движения устройства и камеры; без ключей мокап статичный. */
+  animation: Animation;
+  audio: AudioClip | null;
 }
 export interface HistoryState { past: DocumentState[]; present: DocumentState; future: DocumentState[]; group: string | undefined; changedAt: number }
 export type HistoryAction =
@@ -27,6 +32,8 @@ export const INITIAL_DOCUMENT: DocumentState = {
   // принять за свою.
   image: { url: "", name: "", width: 0, height: 0, demo: true, kind: "image", duration: 0 },
   backdrop: { url: "", name: "", width: 0, height: 0, demo: true, kind: "image", duration: 0 },
+  animation: EMPTY_ANIMATION,
+  audio: null,
 };
 
 /** Пустой слот: им же сбрасываются экран и фон. */
@@ -46,7 +53,9 @@ export function historyReducer(state: HistoryState, action: HistoryAction): Hist
   }
   const next = action.recipe(state.present);
   if (JSON.stringify(next) === JSON.stringify(state.present)) return state;
-  const grouped = Boolean(action.group && action.group === state.group && action.time - state.changedAt < 600);
+  // Жест манипулятора или перенос ключа — один шаг отмены, сколько бы он ни
+  // длился: такие группы приходят с префиксом «gesture:» и уникальным номером.
+  const grouped = Boolean(action.group && action.group === state.group && (action.group.startsWith("gesture:") || action.time - state.changedAt < 600));
   return {
     past: grouped ? state.past : [...state.past, state.present].slice(-80),
     present: next, future: [], group: action.group, changedAt: action.time,

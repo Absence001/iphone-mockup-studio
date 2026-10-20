@@ -1,7 +1,9 @@
 import { INITIAL_DOCUMENT, type DocumentState } from "./history";
 import { deviceFinish } from "./models";
 import { backgroundPreset } from "./backgrounds";
-import { BACKGROUND_MODES, DEFAULT_SETTINGS, DEVICE_IDS, FINISH_IDS, FOLD_OPEN, LID_DEFAULT, LID_MAX, type ScreenKind, type Settings } from "./settings";
+import { BACKGROUND_MODES, DEFAULT_SETTINGS, DEFAULT_TRANSFORM, DEVICE_IDS, FINISH_IDS, FOLD_OPEN, LID_DEFAULT, LID_MAX, SHADOW_PRESETS, SHADOW_VALUES, type ScreenKind, type Settings } from "./settings";
+import { EMPTY_ANIMATION, parseAnimation, serializeAnimation, type Animation } from "./animation";
+import { normalizeAudio, type AudioClip } from "./audio";
 
 /** Допустимые вложения проекта: картинка или видео в виде data:-строки. */
 const ASSET_DATA = /^data:(image\/(png|jpeg|webp)|video\/(mp4|webm|quicktime));base64,/i;
@@ -31,8 +33,15 @@ function color(value: unknown) {
   return value;
 }
 
+/** Необязательное число: старые проекты сохранялись без новых полей. */
+function optional(object: Record<string, unknown>, key: string, min: number, max: number, fallback: number) {
+  return object[key] === undefined ? fallback : number(object, key, min, max);
+}
+
 export function parseProject(text: string): {
   settings: Settings;
+  animation: Animation;
+  audio: AudioClip | null;
   imageData: string | null; imageKind: ScreenKind; imageName: string;
   backdropData: string | null; backdropKind: ScreenKind; backdropName: string;
 } {
@@ -62,11 +71,25 @@ export function parseProject(text: string): {
     },
     // Схема «contrast» до студийного света стала «studio».
     light: { preset: option(light.preset === "contrast" ? "studio" : light.preset, ["soft", "studio", "rim"]), intensity: number(light, "intensity", 0, 200), exposure: number(light, "exposure", 25, 200), rotation: number(light, "rotation", -180, 180) },
-    // Проекты до появления тени сохранялись без этого блока.
+    // Проекты до появления тени сохранялись без этого блока, а до пресетов —
+    // без пресета, длины и цвета: такая тень совпадает с «Мягкой», если её не
+    // меняли, и становится своей, если меняли.
     shadow: s.shadow === undefined ? { ...DEFAULT_SETTINGS.shadow } : (() => {
       const shadow = record(s.shadow);
       if (typeof shadow.enabled !== "boolean") throw new Error("В проекте неверная настройка тени.");
-      return { enabled: shadow.enabled, opacity: number(shadow, "opacity", 0, 100), softness: number(shadow, "softness", 0, 100), distance: number(shadow, "distance", 0, 100) };
+      const shape = {
+        opacity: number(shadow, "opacity", 0, 100), softness: number(shadow, "softness", 0, 100), distance: number(shadow, "distance", 0, 100),
+        length: optional(shadow, "length", 0, 100, SHADOW_VALUES.soft.length),
+      };
+      const matches = (Object.keys(SHADOW_VALUES) as (keyof typeof SHADOW_VALUES)[]).find((id) => JSON.stringify(SHADOW_VALUES[id]) === JSON.stringify(shape));
+      const preset = shadow.preset === undefined ? matches ?? "custom" : option(shadow.preset, SHADOW_PRESETS);
+      const tint = shadow.tint === undefined ? "background" : option(shadow.tint, ["background", "custom"]);
+      return { enabled: shadow.enabled, preset, ...shape, tint, color: shadow.color === undefined ? DEFAULT_SETTINGS.shadow.color : color(shadow.color) };
+    })(),
+    // Проекты до положения устройства сохранялись без этого блока.
+    transform: s.transform === undefined ? { ...DEFAULT_TRANSFORM } : (() => {
+      const t = record(s.transform);
+      return { x: number(t, "x", -4, 4), y: number(t, "y", -4, 4), z: number(t, "z", -4, 4), rotX: number(t, "rotX", -360, 360), rotY: number(t, "rotY", -360, 360), rotZ: number(t, "rotZ", -360, 360), scale: number(t, "scale", 10, 400) };
     })(),
     // Проекты до появления видео сохранялись без этого блока.
     video: s.video === undefined ? { ...DEFAULT_SETTINGS.video } : (() => {
@@ -88,14 +111,20 @@ export function parseProject(text: string): {
   const backdropData = data.backdropData === undefined ? null : data.backdropData;
   if (backdropData !== null && (typeof backdropData !== "string" || !ASSET_DATA.test(backdropData))) throw new Error("В проекте неподдерживаемый фон.");
   const backdropKind: ScreenKind = typeof backdropData === "string" && backdropData.startsWith("data:video/") ? "video" : "image";
+  let audio: AudioClip | null = null;
+  if (data.audio !== undefined && data.audio !== null) {
+    const clip = record(data.audio);
+    if (typeof clip.url !== "string" || !/^data:audio\/(mpeg|mp3|mp4|wav|x-wav|wave|webm|ogg|aac|flac|x-flac);base64,/i.test(clip.url)) throw new Error("В проекте неподдерживаемое аудио.");
+    audio = normalizeAudio({ url: clip.url, name: typeof clip.name === "string" ? clip.name.slice(0, 255) : "Аудио из проекта", duration: number(clip, "duration", 0.01, 36000), offset: number(clip, "offset", 0, 60), start: number(clip, "start", 0, 36000), end: number(clip, "end", 0.01, 36000), volume: number(clip, "volume", 0, 100), muted: clip.muted === true });
+  }
   return {
-    settings, imageData, imageKind, imageName: typeof data.imageName === "string" ? data.imageName.slice(0, 255) : "Экран из проекта",
+    settings, audio, animation: parseAnimation(data.animation), imageData, imageKind, imageName: typeof data.imageName === "string" ? data.imageName.slice(0, 255) : "Экран из проекта",
     backdropData, backdropKind, backdropName: typeof data.backdropName === "string" ? data.backdropName.slice(0, 255) : "Фон из проекта",
   };
 }
 
 /** Файл по ссылке в виде data:-строки, чтобы проект был самодостаточным. */
-async function embed(asset: DocumentState["image"]): Promise<string | null> {
+async function embed(asset: { url: string; demo?: boolean }): Promise<string | null> {
   if (asset.demo || !asset.url) return null;
   const response = await fetch(asset.url);
   const blob = await response.blob();
@@ -108,14 +137,15 @@ async function embed(asset: DocumentState["image"]): Promise<string | null> {
 }
 
 export async function serializeProject(document: DocumentState): Promise<string> {
-  const [imageData, backdropData] = await Promise.all([embed(document.image), embed(document.backdrop)]);
+  const [imageData, backdropData, audioData] = await Promise.all([embed(document.image), embed(document.backdrop), document.audio ? embed(document.audio) : null]);
   return JSON.stringify({
-    app: "forma", version: 1, settings: document.settings,
+    app: "forma", version: 1, settings: document.settings, animation: serializeAnimation(document.animation),
     imageData, imageName: document.image.name,
     backdropData, backdropName: document.backdrop.name,
+    audio: document.audio && audioData ? { ...document.audio, url: audioData } : null,
   }, null, 2);
 }
 
-export function projectDocument(settings: Settings, image: DocumentState["image"] | null, backdrop?: DocumentState["backdrop"] | null): DocumentState {
-  return { settings, image: image ?? INITIAL_DOCUMENT.image, backdrop: backdrop ?? INITIAL_DOCUMENT.backdrop };
+export function projectDocument(settings: Settings, image: DocumentState["image"] | null, backdrop?: DocumentState["backdrop"] | null, animation?: Animation, audio?: AudioClip | null): DocumentState {
+  return { settings, image: image ?? INITIAL_DOCUMENT.image, backdrop: backdrop ?? INITIAL_DOCUMENT.backdrop, animation: animation ?? EMPTY_ANIMATION, audio: audio ?? null };
 }

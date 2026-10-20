@@ -1,30 +1,37 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
-import { Hand, MousePointer2, Minus, Plus, Scan, RotateCcw } from "lucide-react";
+import { Hand, Minus, Move, Orbit, Plus, Rotate3d, Scaling, Scan, RotateCcw } from "lucide-react";
 import { FluidStrip } from "./fluid-strip";
 import { StudioScene } from "@/lib/scene";
-import { aspectRatio, clamp, type CameraSettings, type Settings } from "@/lib/settings";
+import { aspectRatio, clamp, exportSize, type CameraSettings, type DeviceTransform, type Settings } from "@/lib/settings";
 import type { ScreenImage } from "@/lib/history";
 
 export interface ModelState { status: "loading" | "ready" | "error"; message?: string }
-export type NavigationCommand = { id: number; type: "fit" | "zoom-in" | "zoom-out" | "actual" | "hand" | "orbit" };
+/** Инструмент рабочей области: камера, рука или один из манипуляторов устройства. */
+export type Tool = "orbit" | "hand" | "translate" | "rotate" | "scale";
+export type NavigationCommand = { id: number; type: "fit" | "zoom-in" | "zoom-out" | "actual" | Tool };
 
 interface ViewportProps {
   settings: Settings; image: ScreenImage; backdrop: ScreenImage; sceneRef: RefObject<StudioScene | null>;
   onCamera: (camera: CameraSettings) => void; onModel: (state: ModelState) => void;
   onScreen: (size: { width: number; height: number }) => void;
+  /** Манипулятор устройства: начало, ход и конец жеста. */
+  onTransform: (value: DeviceTransform, phase: "start" | "change" | "end") => void;
   onError: (message: string) => void; modelState: ModelState; navigation: NavigationCommand | null;
   /** Видео на экране пошло или встало. */
   onVideo: (playing: boolean) => void;
+  /** Короткое нажатие Space без перетаскивания: в анимации это пуск и пауза. */
+  onSpaceTap?: () => void;
   onResetCamera: () => void; onDropFile: (file: File) => void; busy: boolean;
-  topLeft: ReactNode; topRight: ReactNode;
+  topLeft: ReactNode; topCenter?: ReactNode; topRight: ReactNode;
 }
 
 interface View { x: number; y: number; zoom: number }
 
 const HOME: View = { x: 0, y: 0, zoom: 1 };
-const MIN_ZOOM = 0.2;
+/** Меньше половины кадр не уменьшается: в точку его уводить незачем. */
+const MIN_ZOOM = 0.5;
 const MAX_ZOOM = 4;
 /** Постоянная времени догона цели, мс. Чем больше, тем мягче ход. */
 const GLIDE_MS = 90;
@@ -33,13 +40,34 @@ const GLIDE_MS = 90;
 const WHEEL_ZOOM = 0.0015;
 /** Шаг кнопок «плюс» и «минус», он же шаг клавиш + и −. */
 const BUTTON_ZOOM = 1.25;
+/**
+ * Поля вокруг кадра: слева и справа — под панель инструментов, сверху и
+ * снизу — под верхнюю строку и масштаб. Кадр в целом виде не заходит под них.
+ */
+const SIDE = 76;
+/** Сверху ещё и место под подпись кадра, чтобы она не заходила под верхнюю строку. */
+const TOP = 84;
+const BOTTOM = 64;
+/** Насколько увеличенный кадр можно увести за край рабочей области. */
+const OVERSCROLL = 48;
+/** Сколько длится нажатие Space, которое ещё считается коротким. */
+const TAP_MS = 260;
 
-export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onModel, onScreen, onError, onVideo, modelState, navigation, onResetCamera, onDropFile, busy, topLeft, topRight }: ViewportProps) {
+const TOOLS: { id: Tool; label: string; key: string; icon: typeof Orbit }[] = [
+  { id: "orbit", label: "Камера", key: "V", icon: Orbit },
+  { id: "translate", label: "Перемещение", key: "W", icon: Move },
+  { id: "rotate", label: "Вращение", key: "E", icon: Rotate3d },
+  { id: "scale", label: "Масштаб", key: "R", icon: Scaling },
+  { id: "hand", label: "Рука", key: "H", icon: Hand },
+];
+
+export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onModel, onScreen, onTransform, onError, onVideo, onSpaceTap, modelState, navigation, onResetCamera, onDropFile, busy, topLeft, topCenter, topRight }: ViewportProps) {
   const workspaceRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const initial = useRef(settings);
   const [generation, setGeneration] = useState(0);
   const [available, setAvailable] = useState({ width: 900, height: 650 });
+  const availableRef = useRef(available);
   const [view, setView] = useState<View>(HOME);
   const viewRef = useRef(view);
   // Куда рабочая область едет. Колесо и кнопки двигают цель, а кадры догоняют
@@ -48,19 +76,37 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
   const glideRef = useRef<number | null>(null);
   const glideStampRef = useRef(0);
   const calmRef = useRef(false);
-  const [hand, setHand] = useState(false);
+  const [tool, setTool] = useState<Tool>("orbit");
   const [space, setSpace] = useState(false);
+  const spaceRef = useRef<{ at: number; panned: boolean } | null>(null);
   const [panning, setPanning] = useState(false);
   const [draggingFile, setDraggingFile] = useState(false);
   const panRef = useRef<{ pointer: number; x: number; y: number; startX: number; startY: number } | null>(null);
   const dragDepth = useRef(0);
   const ratio = aspectRatio(settings.aspect);
-  const width = Math.min(Math.max(160, available.width - 112), Math.max(160, available.height - 100) * ratio);
+  const width = Math.min(Math.max(160, available.width - SIDE * 2), Math.max(160, available.height - TOP - BOTTOM) * ratio);
   const height = width / ratio;
+  const frameSize = useRef({ width, height });
+  frameSize.current = { width, height };
+  const output = exportSize(settings.aspect, settings.resolution);
+  const hand = tool === "hand";
   // Превью рисуется в CSS-масштабе рабочей области, поэтому при наезде холст
   // просто растягивался бы. Плотность пикселей идёт за масштабом ступенями по
   // 0,5, чтобы буфер не пересоздавался на каждом кадре наезда.
   const renderScale = Math.min(MAX_ZOOM, Math.max(1, Math.round(view.zoom * 2) / 2));
+
+  /**
+   * Кадр не уходит за рабочую область: пока он помещается целиком, он стоит
+   * по центру, а увеличенный двигается только до своих краёв с небольшим запасом.
+   */
+  const bound = useCallback((next: View): View => {
+    const { width: frameWidth, height: frameHeight } = frameSize.current;
+    const area = availableRef.current;
+    const limitX = Math.max(0, (frameWidth * next.zoom - (area.width - SIDE * 2)) / 2 + OVERSCROLL);
+    const limitY = Math.max(0, (frameHeight * next.zoom - (area.height - TOP - BOTTOM)) / 2 + OVERSCROLL);
+    const fits = frameWidth * next.zoom <= area.width - SIDE * 2 + 1 && frameHeight * next.zoom <= area.height - TOP - BOTTOM + 1;
+    return { zoom: next.zoom, x: fits ? 0 : clamp(next.x, -limitX, limitX), y: fits ? 0 : clamp(next.y, -limitY, limitY) };
+  }, []);
 
   useEffect(() => { calmRef.current = window.matchMedia("(prefers-reduced-motion: reduce)").matches; }, []);
   useEffect(() => () => { if (glideRef.current !== null) cancelAnimationFrame(glideRef.current); }, []);
@@ -97,19 +143,20 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
   /** Мгновенный сдвиг: перетаскивание должно держаться за курсор. */
   const setViewNow = useCallback((next: View) => {
     stopGlide();
-    targetRef.current = next;
-    viewRef.current = next;
-    setView(next);
-  }, [stopGlide]);
+    const bounded = bound(next);
+    targetRef.current = bounded;
+    viewRef.current = bounded;
+    setView(bounded);
+  }, [bound, stopGlide]);
 
   /** Плавный переход к новой цели. Цель считается от предыдущей цели, а не от
    *  текущего кадра, иначе быстрые щелчки колеса съедали бы друг друга. */
   const setViewSoon = useCallback((recipe: (target: View) => View) => {
-    const next = recipe(targetRef.current);
+    const next = bound(recipe(targetRef.current));
     targetRef.current = next;
     if (calmRef.current) { viewRef.current = next; setView(next); return; }
     glide();
-  }, [glide]);
+  }, [bound, glide]);
 
   const zoomBy = useCallback((factor: number, anchorX = 0, anchorY = 0) => {
     setViewSoon((target) => {
@@ -126,10 +173,10 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
     const host = canvasRef.current;
     if (!host) return;
     let scene: StudioScene | null = null;
-    try { scene = new StudioScene(host, initial.current, { camera: onCamera, model: onModel, screen: onScreen, video: onVideo }); sceneRef.current = scene; }
+    try { scene = new StudioScene(host, initial.current, { camera: onCamera, model: onModel, screen: onScreen, video: onVideo, transform: onTransform }); sceneRef.current = scene; }
     catch { onModel({ status: "error", message: "Не удалось запустить 3D. Включите аппаратное ускорение в браузере и нажмите «Повторить»." }); }
     return () => { scene?.dispose(); sceneRef.current = null; };
-  }, [generation, sceneRef, onCamera, onModel, onScreen, onVideo]);
+  }, [generation, sceneRef, onCamera, onModel, onScreen, onVideo, onTransform]);
   useEffect(() => { sceneRef.current?.update(settings); }, [settings, generation, sceneRef]);
   useEffect(() => {
     const scene = sceneRef.current;
@@ -144,13 +191,20 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
     sceneRef.current?.setBackdrop(backdrop.url, backdrop.kind).catch(() => onError("Не удалось прочитать файл фона. Выберите PNG, JPG, WebP, MP4 или WebM."));
   }, [backdrop.url, backdrop.kind, generation, sceneRef, onError]);
   useEffect(() => { sceneRef.current?.setInteractionEnabled(!hand && !space && !busy); }, [hand, space, busy, generation, sceneRef]);
+  useEffect(() => { sceneRef.current?.setGizmo(tool === "translate" || tool === "rotate" || tool === "scale" ? tool : "none"); }, [tool, generation, sceneRef]);
   useEffect(() => {
     const host = workspaceRef.current;
     if (!host) return;
-    const observer = new ResizeObserver(() => setAvailable({ width: host.clientWidth, height: host.clientHeight }));
+    const observer = new ResizeObserver(() => {
+      availableRef.current = { width: host.clientWidth, height: host.clientHeight };
+      setAvailable(availableRef.current);
+    });
     observer.observe(host);
     return () => observer.disconnect();
   }, []);
+  // Окно или нижняя панель поменяли место под кадр: сдвиг пересчитывается
+  // под новые границы, а сам ракурс и экспорт не меняются.
+  useEffect(() => { setViewNow(viewRef.current); }, [available, width, height, setViewNow]);
 
   useEffect(() => {
     const host = workspaceRef.current;
@@ -173,27 +227,46 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
     return () => host.removeEventListener("wheel", wheel, { capture: true });
   }, [zoomBy, setViewSoon]);
 
+  const spaceTap = useRef(onSpaceTap);
+  spaceTap.current = onSpaceTap;
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Shift") sceneRef.current?.setSnap(true);
       if (event.defaultPrevented) return;
       if (event.target instanceof HTMLElement && event.target.closest("input, textarea, select, [contenteditable=true]")) return;
       if (event.target instanceof HTMLElement && (event.target.closest('[role="combobox"], [role="listbox"], [role="option"], [role="tablist"], dialog') || event.target.closest('button, a') && event.target.matches(':focus-visible'))) return;
-      if (event.code === "Space") { event.preventDefault(); setSpace(true); }
+      if (event.code === "Space") {
+        event.preventDefault();
+        if (!event.repeat && !spaceRef.current) spaceRef.current = { at: event.timeStamp, panned: false };
+        setSpace(true);
+      }
     };
-    const release = (event: KeyboardEvent) => { if (event.code === "Space") setSpace(false); };
-    const blur = () => { setSpace(false); panRef.current = null; setPanning(false); };
+    const release = (event: KeyboardEvent) => {
+      if (event.key === "Shift") sceneRef.current?.setSnap(false);
+      if (event.code !== "Space") return;
+      const press = spaceRef.current;
+      spaceRef.current = null;
+      setSpace(false);
+      // Время событий отражает само нажатие: тяжёлый кадр WebGL между
+      // keydown и keyup не должен превращать короткий Space в удержание.
+      if (press && !press.panned && event.timeStamp - press.at < TAP_MS) spaceTap.current?.();
+    };
+    const blur = () => { setSpace(false); spaceRef.current = null; panRef.current = null; setPanning(false); sceneRef.current?.setSnap(false); };
     window.addEventListener("keydown", keydown); window.addEventListener("keyup", release); window.addEventListener("blur", blur);
     return () => { window.removeEventListener("keydown", keydown); window.removeEventListener("keyup", release); window.removeEventListener("blur", blur); };
-  }, []);
+  }, [sceneRef]);
 
   useEffect(() => {
     if (!navigation) return;
     if (navigation.type === "fit") fit();
-    else if (navigation.type === "hand") setHand(true);
-    else if (navigation.type === "orbit") setHand(false);
     else if (navigation.type === "actual") setViewSoon((target) => ({ ...target, zoom: 1 }));
-    else zoomBy(navigation.type === "zoom-in" ? BUTTON_ZOOM : 1 / BUTTON_ZOOM);
+    else if (navigation.type === "zoom-in" || navigation.type === "zoom-out") zoomBy(navigation.type === "zoom-in" ? BUTTON_ZOOM : 1 / BUTTON_ZOOM);
+    else setTool(navigation.type);
   }, [navigation, fit, zoomBy, setViewSoon]);
+
+  // Подпись кадра стоит над его левым верхним углом и едет вместе с ним.
+  const frameLeft = available.width / 2 + view.x - width * view.zoom / 2;
+  const frameTop = available.height / 2 + view.y - height * view.zoom / 2;
 
   return <div className={`workspace${hand || space ? " hand-mode" : ""}${panning ? " panning" : ""}`} ref={workspaceRef} aria-label="Рабочая область" tabIndex={0}
     onContextMenu={(event) => event.preventDefault()}
@@ -201,10 +274,14 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
       // Иконка внутри кнопки — это SVGElement, а не HTMLElement: проверка по
       // HTMLElement пропускала клик по иконке в панорамирование, и в режиме
       // руки кнопки панелей переставали нажиматься.
-      if (event.target instanceof Element && event.target.closest("button, input, select, [role='combobox']")) return;
+      if (event.target instanceof Element && event.target.closest("button, input, select, textarea, summary, a, [contenteditable=true], [role='combobox']")) return;
+      // Возвращаем фокус с последнего поля/кнопки на сцену: Space после
+      // вращения холста должен управлять воспроизведением.
+      workspaceRef.current?.focus({ preventScroll: true });
       if (event.button !== 1 && !(event.button === 0 && (hand || space))) return;
       event.preventDefault(); event.stopPropagation();
       stopGlide();
+      if (spaceRef.current) spaceRef.current.panned = true;
       workspaceRef.current?.setPointerCapture(event.pointerId);
       panRef.current = { pointer: event.pointerId, x: viewRef.current.x, y: viewRef.current.y, startX: event.clientX, startY: event.clientY };
       setPanning(true);
@@ -216,11 +293,13 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
     onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; } }}
     onDragLeave={() => { dragDepth.current--; if (dragDepth.current <= 0) { dragDepth.current = 0; setDraggingFile(false); } }}
     onDrop={(event) => { event.preventDefault(); dragDepth.current = 0; setDraggingFile(false); const file = event.dataTransfer.files[0]; if (file) onDropFile(file); }}>
-    <div className="workspace-topline"><div>{topLeft}</div><div>{topRight}</div></div>
+    <div className="workspace-topline"><div>{topLeft}</div>{topCenter && <div className="workspace-center">{topCenter}</div>}<div>{topRight}</div></div>
     <FluidStrip axis="y" className="tool-rail" role="toolbar" aria-label="Инструменты рабочей области">
-      <button className={!hand ? "active" : ""} aria-label="Вращение (V)" aria-pressed={!hand} title="Вращение · V" onClick={() => setHand(false)}><MousePointer2 size={18} /></button>
-      <button className={hand ? "active" : ""} aria-label="Рука (H)" aria-pressed={hand} title="Перемещение · H / Space" onClick={() => setHand(true)}><Hand size={18} /></button>
+      {TOOLS.map(({ id, label, key, icon: Icon }) => <button key={id} className={tool === id ? "active" : ""} aria-label={`${label} (${key})`} aria-pressed={tool === id} title={`${label} · ${key}${id === "hand" ? " / Space" : ""}`} onClick={() => setTool(id)}><Icon size={18} /></button>)}
     </FluidStrip>
+    <div className="frame-label" aria-hidden="true" style={{ transform: `translate(${Math.round(frameLeft)}px, ${Math.round(frameTop - 22)}px)` }}>
+      <span>{settings.aspect}</span><span>{output.width} × {output.height}</span>
+    </div>
     <div className="artboard" data-clarity-mask="true" data-testid="artboard" data-view-zoom={view.zoom.toFixed(3)} data-view-x={view.x.toFixed(1)} data-view-y={view.y.toFixed(1)}
       style={{ width, height, transform: `translate(-50%, -50%) translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}>
       <div className={`render-surface${settings.background.mode === "transparent" ? " checkerboard" : ""}`} ref={canvasRef} />
@@ -230,7 +309,7 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
     </div>
     {draggingFile && <div className="drop-overlay"><span><Plus size={32} /> Отпустите, чтобы заменить экран</span></div>}
     <div className="workspace-bottom">
-      <FluidStrip axis="x" className="zoom-toolbar"><button aria-label="Уменьшить рабочую область" title="Уменьшить · −" onClick={() => zoomBy(1 / BUTTON_ZOOM)}><Minus size={15} /></button><button className="zoom-value" onClick={fit} title="Уместить холст · Shift+1">{Math.round(view.zoom * 100)}%</button><button aria-label="Увеличить рабочую область" title="Увеличить · +" onClick={() => zoomBy(BUTTON_ZOOM)}><Plus size={15} /></button><span /><button aria-label="Уместить холст" title="Уместить холст · Shift+1" onClick={fit}><Scan size={16} /></button></FluidStrip>
+      <FluidStrip axis="x" className="zoom-toolbar"><button aria-label="Уменьшить рабочую область" title="Уменьшить · −" onClick={() => zoomBy(1 / BUTTON_ZOOM)}><Minus size={15} /></button><button className="zoom-value" onClick={fit} title="Уместить кадр · Shift+1">{Math.round(view.zoom * 100)}%</button><button aria-label="Увеличить рабочую область" title="Увеличить · +" onClick={() => zoomBy(BUTTON_ZOOM)}><Plus size={15} /></button><span /><button aria-label="Уместить холст" title="Уместить кадр · Shift+1" onClick={fit}><Scan size={16} /></button></FluidStrip>
       <button className="reset-view icon-button" onClick={onResetCamera} aria-label="Сбросить камеру" title="Сбросить камеру"><RotateCcw size={16} /></button>
     </div>
   </div>;

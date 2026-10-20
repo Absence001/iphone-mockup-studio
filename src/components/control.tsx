@@ -6,9 +6,17 @@ import type { ItemRect } from "@/hooks/use-fluid-hover";
 import { clamp } from "@/lib/settings";
 import { spring } from "@/lib/springs";
 
-interface ControlProps { label: string; value: number; min: number; max: number; step?: number; unit?: string; disabled?: boolean; onChange: (value: number) => void }
+interface ControlProps {
+  label: string; value: number; min: number; max: number; step?: number; unit?: string; disabled?: boolean; onChange: (value: number) => void;
+  /**
+   * Ключ анимации у свойства: «key» — ключ стоит в текущем времени, «animated» —
+   * свойство анимировано, но в этом времени ключа нет. Без onKey ромба нет.
+   */
+  keyState?: "none" | "animated" | "key";
+  onKey?: () => void;
+}
 
-export function Control({ label, value, min, max, step = 1, unit = "", disabled = false, onChange }: ControlProps) {
+export function Control({ label, value, min, max, step = 1, unit = "", disabled = false, onChange, keyState = "none", onKey }: ControlProps) {
   const id = useId();
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -20,8 +28,12 @@ export function Control({ label, value, min, max, step = 1, unit = "", disabled 
   const display = Number(value.toFixed(step < 1 || !Number.isInteger(value) ? 1 : 0)).toString();
   useEffect(() => { if (!editing) setDraft(display); }, [display, editing]);
 
-  return <div className={`control${disabled ? " is-disabled" : ""}${scrubbing ? " is-scrubbing" : ""}`}>
+  return <div className={`control${disabled ? " is-disabled" : ""}${scrubbing ? " is-scrubbing" : ""}`} data-control={label}>
     <div className="control-heading">
+      {onKey && <button type="button" className={`control-key ${keyState}`} disabled={disabled} onClick={onKey}
+        aria-label={keyState === "key" ? `Убрать ключ: ${label}` : `Поставить ключ: ${label}`} title={keyState === "key" ? "Убрать ключ в этом времени" : keyState === "animated" ? "Поставить ключ в этом времени" : "Анимировать: поставить ключ"}>
+        <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M5 0.8L9.2 5 5 9.2 0.8 5Z" /></svg>
+      </button>}
       <label htmlFor={id} className="scrub-label" title="Тяните для изменения · Shift для точной настройки"
         onPointerDown={(event) => { if (disabled || event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); scrub.current = { x: event.clientX, value, moved: false }; }}
         onPointerMove={(event) => { if (!scrub.current) return; const delta = event.clientX - scrub.current.x; if (Math.abs(delta) > 2 && !scrub.current.moved) { scrub.current.moved = true; setScrubbing(true); } if (scrub.current.moved) onChange(clamp(Math.round((scrub.current.value + delta * step * (event.shiftKey ? 0.1 : 1)) * 100) / 100, min, max)); }}
@@ -68,7 +80,10 @@ export function Segmented<T extends string>({ label, value, items, onChange, cla
     if (!container) return;
     const measure = () => {
       const button = container.querySelectorAll<HTMLElement>(":scope > button")[index];
-      setRect(button ? { left: button.offsetLeft, top: button.offsetTop, width: button.offsetWidth, height: button.offsetHeight } : null);
+      // В свёрнутом разделе кнопок нет на странице и размер равен нулю. Такой
+      // прямоугольник не запоминаем: иначе при раскрытии подложка выезжала бы
+      // пружиной из угла. Без него она появляется сразу на своём месте.
+      setRect(button && button.offsetWidth > 0 ? { left: button.offsetLeft, top: button.offsetTop, width: button.offsetWidth, height: button.offsetHeight } : null);
     };
     measure();
     // Ширина кнопок зависит от ширины панели, поэтому подложка пересчитывается
