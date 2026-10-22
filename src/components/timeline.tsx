@@ -8,6 +8,7 @@ import type { Clock } from "@/lib/clock";
 import { MAX_DURATION, MIN_DURATION, TIME_STEP, TRACKS, allKeyTimes, findKey, isAnimated, keyAt, objectKeyTimes, objectKeysAt, objectTracks, roundTime, type AnimatedObject, type Animation, type KeyRef, type TrackId } from "@/lib/animation";
 import { objectKeys, sameKey, sameSegment, selectedKeys, selectedSegments, uniqueKeys, type SegmentRef, type Selection } from "@/lib/timeline-selection";
 import { clamp } from "@/lib/settings";
+import { tip } from "./tooltip-layer";
 
 export type { Selection } from "@/lib/timeline-selection";
 
@@ -27,9 +28,11 @@ interface TimelineProps {
   onAudioChange: (clip: AudioClip, phase: AudioChangePhase) => void;
 }
 
-const LABEL = 208;
+const LABEL = 224;
 /** Поле слева от нуля и справа от конца: крайние ключи и курсор видны целиком. */
 const PAD = 12;
+/** Справа места больше: подпись последней отметки шкалы стоит правее неё. */
+const END_PAD = 36;
 /** Насколько близко к ключу должен подойти курсор, чтобы прилипнуть с Shift. */
 const SNAP_PX = 10;
 const TICKS = [0.05, 0.1, 0.2, 0.25, 0.5, 1, 2, 5, 10];
@@ -63,9 +66,9 @@ export function Timeline({ animation, clock, selection, deviceName, onSelect, on
   useEffect(() => () => cleanupRef.current?.(), []);
   const { playing, time } = useClock(clock);
   const duration = animation.duration;
-  const fit = Math.max(40, (visible - LABEL - PAD * 2 - 4) / duration);
+  const fit = Math.max(40, (visible - LABEL - PAD - END_PAD - 4) / duration);
   const pps = fit * zoom;
-  const width = LABEL + duration * pps + PAD * 2;
+  const width = LABEL + duration * pps + PAD + END_PAD;
   const step = TICKS.find((tick) => tick * pps >= 64) ?? 10;
   const keyTimes = allKeyTimes(animation);
   const chosenKeys = selectedKeys(animation, selection);
@@ -226,7 +229,7 @@ export function Timeline({ animation, clock, selection, deviceName, onSelect, on
           onClick={(event) => chooseSegments(segments, event.shiftKey)} />;
       })}
       {list.map((item) => <button key={`k${item.keys.map((ref) => ref.id).join()}`} data-key-ids={item.keys.map((ref) => ref.id).join()} type="button" className={`timeline-key${item.keys.some((key) => chosenKeys.some((other) => sameKey(key, other))) ? " selected" : ""}${Math.abs(item.time - time) < TIME_STEP / 2 ? " current" : ""}`} aria-pressed={item.keys.every((key) => chosenKeys.some((other) => sameKey(key, other)))}
-        style={{ left: PAD + item.time * pps }} aria-label={`Ключ ${label}, ${seconds(item.time)}`} title={seconds(item.time)}
+        style={{ left: PAD + item.time * pps }} aria-label={`Ключ ${label}, ${seconds(item.time)}`} {...tip(seconds(item.time))}
         onPointerDown={(event) => startKey(event, item.time, item.keys)} onClick={(event) => { if (event.detail === 0) chooseKeys(item.keys, event.shiftKey); }} />)}
     </div>;
   };
@@ -238,9 +241,9 @@ export function Timeline({ animation, clock, selection, deviceName, onSelect, on
     return <Fragment key={object}>
       <div className="timeline-row object">
         <div className="timeline-label">
-          <button type="button" className="timeline-expand" aria-expanded={open[object]} aria-label={open[object] ? `Свернуть ${label}` : `Развернуть ${label}`} disabled={!tracks.length} onClick={() => setOpen((current) => ({ ...current, [object]: !current[object] }))}><ChevronRight size={13} /></button>
+          <button type="button" className="timeline-expand" aria-expanded={open[object]} aria-label={open[object] ? `Свернуть ${label}` : `Развернуть ${label}`} {...tip(!tracks.length ? "Нет анимированных свойств" : open[object] ? "Свернуть свойства" : "Показать свойства")} disabled={!tracks.length} onClick={() => setOpen((current) => ({ ...current, [object]: !current[object] }))}><ChevronRight size={14} /></button>
           <button type="button" className="timeline-name" aria-label={`Выбрать все ключи: ${label}`} aria-pressed={times.length > 0 && objectKeys(animation, object).every((key) => chosenKeys.some((other) => sameKey(key, other)))} onClick={(event) => chooseKeys(objectKeys(animation, object), event.shiftKey)}>{label}</button>
-          <button type="button" className={`timeline-keybutton${atCursor ? " active" : ""}`} aria-label={`Записать ключ: ${label}`} title={`Записать текущее положение: ${label}`} onClick={() => onObjectKey(object)}><Diamond size={11} /></button>
+          <button type="button" className={`timeline-keybutton${atCursor ? " active" : ""}`} aria-label={`Записать ключ: ${label}`} {...tip(`Записать текущее положение: ${label}`)} onClick={() => onObjectKey(object)}><Diamond size={12} /></button>
         </div>
         {lane(object, times, label)}
       </div>
@@ -250,8 +253,8 @@ export function Timeline({ animation, clock, selection, deviceName, onSelect, on
         const selected = selection?.kind === "track" && selection.track === id;
         return <div className={`timeline-row track${selected ? " selected" : ""}`} key={id}>
           <div className="timeline-label">
-            <button type="button" className="timeline-track-name" onClick={() => onSelect({ kind: "track", track: id })} title="Показать настройку">{info.label}</button>
-            <button type="button" className={`timeline-keybutton${keyAt(animation.tracks[id], time) ? " active" : ""}`} aria-label={`${keyAt(animation.tracks[id], time) ? "Убрать" : "Поставить"} ключ: ${info.label}`} onClick={() => onToggleKey(id)}><Diamond size={10} /></button>
+            <button type="button" className="timeline-track-name" onClick={() => onSelect({ kind: "track", track: id })} {...tip("Показать настройку")}>{info.label}</button>
+            <button type="button" className={`timeline-keybutton${keyAt(animation.tracks[id], time) ? " active" : ""}`} aria-label={`${keyAt(animation.tracks[id], time) ? "Убрать" : "Поставить"} ключ: ${info.label}`} {...tip(`${keyAt(animation.tracks[id], time) ? "Убрать" : "Поставить"} ключ в этом времени`)} onClick={() => onToggleKey(id)}><Diamond size={12} /></button>
           </div>
           {lane(id, keys, info.label)}
         </div>;
@@ -266,15 +269,15 @@ export function Timeline({ animation, clock, selection, deviceName, onSelect, on
   return <section className="timeline" aria-label="Таймлайн">
     <div className="timeline-bar">
       <div className="timeline-transport">
-        <button type="button" className="icon-button" onClick={onTogglePlay} aria-label={playing ? "Пауза" : "Воспроизвести"} title={`${playing ? "Пауза" : "Воспроизвести"} · Space`}>{playing ? <Pause size={15} /> : <Play size={15} />}</button>
-        <button type="button" className="icon-button" onClick={() => onSeek(0)} aria-label="В начало" title="В начало · Home"><SkipBack size={15} /></button>
-        <button type="button" className={`icon-button${loop ? " active" : ""}`} aria-pressed={loop} aria-label="Повтор" title="Повтор" onClick={() => { setLoop(!loop); onLoop(!loop); }}><Repeat size={14} /></button>
+        <button type="button" className="icon-button" onClick={onTogglePlay} aria-label={playing ? "Пауза" : "Воспроизвести"} {...tip(playing ? "Пауза" : "Воспроизвести", "Space")}>{playing ? <Pause size={16} /> : <Play size={16} />}</button>
+        <button type="button" className="icon-button" onClick={() => onSeek(0)} aria-label="В начало" {...tip("В начало", "Home")}><SkipBack size={16} /></button>
+        <button type="button" className={`icon-button${loop ? " active" : ""}`} aria-pressed={loop} aria-label="Повтор" {...tip(loop ? "Выключить повтор" : "Повторять по кругу")} onClick={() => { setLoop(!loop); onLoop(!loop); }}><Repeat size={14} /></button>
       </div>
       <TimeField label="Текущее время" value={time} max={duration} onCommit={onSeek} />
       <span className="timeline-of">из</span>
       <TimeField label="Длительность" value={duration} min={MIN_DURATION} max={MAX_DURATION} onCommit={onDuration} />
-      {!audio && <button type="button" className="small-button timeline-add-audio" onClick={onAddAudio}><Music2 size={12} /> Добавить аудио</button>}
-      <label className="timeline-zoom" title="Масштаб шкалы"><span>Масштаб шкалы</span><input type="range" min={1} max={12} step={0.1} value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
+      {!audio && <button type="button" className="small-button timeline-add-audio" onClick={onAddAudio}><Music2 size={14} /> Добавить аудио</button>}
+      <label className="timeline-zoom"><span>Масштаб шкалы</span><input type="range" aria-label="Масштаб шкалы" min={1} max={12} step={0.1} value={zoom} onChange={(event) => setZoom(Number(event.target.value))} /></label>
     </div>
     <div className="timeline-scroll" ref={scrollRef} onWheel={(event) => { if (!event.ctrlKey && !event.metaKey) return; event.preventDefault(); setZoom((value) => clamp(value * Math.exp(-event.deltaY * 0.002), 1, 12)); }}>
       <div className="timeline-content" ref={contentRef} style={{ width }} tabIndex={-1} onPointerDown={startMarquee}>
@@ -289,7 +292,7 @@ export function Timeline({ animation, clock, selection, deviceName, onSelect, on
         {objectRow("device", deviceName)}
         {audio && <AudioTrack clip={audio} buffer={audioBuffer} duration={duration} pps={pps} selected={selection?.kind === "audio"} onSelect={() => onSelect({ kind: "audio" })} onChange={onAudioChange} />}
         {marquee && <div className="timeline-marquee" style={{ left: marquee.x, top: marquee.y, width: marquee.width, height: marquee.height }} aria-hidden="true" />}
-        {empty && !audio && <p className="timeline-hint">Поставьте курсор времени и поверните камеру или устройство — ключи появятся сами. Готовые движения — рядом с ракурсами над холстом.</p>}
+        {empty && !audio && <p className="timeline-hint">Поставьте курсор времени и поверните камеру или устройство — ключи появятся сами. Готовые движения — рядом с ракурсами над холстом.</p>}
         <div className={`timeline-playhead${scrub ? " dragging" : ""}`} style={{ left: LABEL + PAD + time * pps }} aria-hidden="true"><span className="timeline-playhead-head" onPointerDown={startScrub} /></div>
       </div>
     </div>
@@ -306,7 +309,7 @@ function TimeField({ label, value, min = 0, max, onCommit }: { label: string; va
     if (draft.trim() && Number.isFinite(parsed)) onCommit(roundTime(clamp(parsed, min, max)));
     setDraft(null);
   };
-  return <label className="timeline-time" title={label}>
+  return <label className="timeline-time" {...tip(label)}>
     <span className="sr-only">{label}</span>
     <input value={draft ?? value.toFixed(2).replace(".", ",")} inputMode="decimal" aria-label={label} spellCheck={false}
       onFocus={(event) => { setDraft(value.toFixed(2).replace(".", ",")); event.currentTarget.select(); }}

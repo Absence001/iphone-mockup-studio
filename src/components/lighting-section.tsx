@@ -4,6 +4,7 @@ import { useRef } from "react";
 import { Sun } from "lucide-react";
 import { Control } from "./control";
 import { FluidChoice } from "./fluid-choice";
+import { tip } from "./tooltip-layer";
 import { clamp, type Settings } from "@/lib/settings";
 
 const SCHEMES = [
@@ -20,7 +21,7 @@ export function LightingSection({ light, onChange }: { light: Settings["light"];
   };
   return <div className="lighting-settings">
     <FluidChoice label="Схема освещения" value={light.preset} items={SCHEMES} icon={Sun} className="light-choice" onChange={(id) => { const scheme = SCHEMES.find((item) => item.id === id); if (scheme) onChange({ preset: scheme.id as Settings["light"]["preset"] }); }} />
-    <div className="light-direction-pad" role="slider" tabIndex={0} aria-label="Направление света на площадке" aria-valuemin={-180} aria-valuemax={180} aria-valuenow={light.rotation} aria-valuetext={`${light.rotation}°`} title="Тяните по горизонтали, чтобы повернуть свет вокруг устройства"
+    <div className="light-direction-pad" role="slider" tabIndex={0} aria-label="Направление света на площадке" aria-valuemin={-180} aria-valuemax={180} aria-valuenow={light.rotation} aria-valuetext={`${light.rotation}°`} {...tip("Тяните по горизонтали, чтобы повернуть свет вокруг устройства")}
       onPointerDown={(event) => { if (event.button !== 0) return; event.preventDefault(); event.currentTarget.focus(); event.currentTarget.setPointerCapture(event.pointerId); dragStart.current = light.rotation; setDirection(event.clientX, event.currentTarget); }}
       onPointerMove={(event) => { if (dragStart.current !== null) setDirection(event.clientX, event.currentTarget); }}
       onPointerUp={(event) => { dragStart.current = null; if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); }}

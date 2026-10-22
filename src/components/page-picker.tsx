@@ -3,6 +3,7 @@
 import { Camera, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PagePreview } from "@/lib/capture";
+import { tip } from "./tooltip-layer";
 
 /**
  * Окно в форме экрана модели поверх предпросмотра всей страницы. Страницу
@@ -36,7 +37,7 @@ export function PagePicker({ preview, onCancel, onConfirm }: { preview: PagePrev
 
   return <dialog ref={dialogRef} className="help-dialog page-picker" data-clarity-mask="true" aria-labelledby="page-picker-title" onCancel={(event) => { event.preventDefault(); onCancel(); }}
     onKeyDown={(event) => { if (event.key === "Enter" && !(event.target instanceof HTMLButtonElement)) { event.preventDefault(); onConfirm(position); } }}>
-    <div className="dialog-heading"><span className="dialog-icon"><Camera size={22} /></span><button className="icon-button" aria-label="Закрыть" onClick={onCancel}><X size={18} /></button></div>
+    <div className="dialog-heading"><span className="dialog-icon"><Camera size={22} /></span><button className="icon-button" aria-label="Закрыть" {...tip("Закрыть", "Esc")} onClick={onCancel}><X size={16} /></button></div>
     <h2 id="page-picker-title">Какой экран снять?</h2>
     <p>Прокрутите {preview.name} до нужного места. В мокап попадёт то, что видно в окне.</p>
     <div ref={windowRef} className="page-window" tabIndex={0} role="region" aria-label="Страница сайта" style={{ width: box.width, height: box.height }}

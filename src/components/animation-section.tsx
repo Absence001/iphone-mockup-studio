@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { ChevronDown, Diamond, Film, Trash } from "lucide-react";
 import { Control } from "./control";
+import { tip } from "./tooltip-layer";
 import { seconds, type Selection } from "./timeline";
 import { plural } from "@/lib/plural";
 import { EASE_FAMILIES, TIME_STEP, easeId, easePath, findKey, trackInfo, type Animation, type EaseId, type KeyRef, type TrackId } from "@/lib/animation";
@@ -56,7 +57,7 @@ export function AnimationSection({ animation, selection, unit, videoLength, onEa
   const singleInfo = single ? trackInfo(keys[0].track) : null;
   const track = selection?.kind === "track" ? selection.track : null;
 
-  const curveButton = (id: EaseId, label: string) => <button key={id} type="button" className={`ease-option${current === id ? " selected" : ""}`} aria-pressed={current === id} title={label}
+  const curveButton = (id: EaseId, label: string) => <button key={id} type="button" className={`ease-option${current === id ? " selected" : ""}`} aria-pressed={current === id} {...tip(label)}
     onClick={() => onEase(segments, id)}><Curve id={id} /><span>{label}</span></button>;
 
   return <div className="animation-panel">
@@ -65,7 +66,7 @@ export function AnimationSection({ animation, selection, unit, videoLength, onEa
       {segment && <Control label="Длина участка" value={Number((segment.to - segment.from).toFixed(2))} min={TIME_STEP * 10} max={30} step={0.05} unit="с" onChange={(length) => onSegmentLength(segmentTracks, segment.from, segment.to, length)} />}
       <div className="section-heading ease-heading"><h3>Кривая</h3>{current === "mixed" && <span className="format-badge">Разные</span>}</div>
       <div className="ease-grid" role="group" aria-label="Кривая участка">{MAIN_EASES.map((item) => curveButton(item.id, item.label))}</div>
-      <button type="button" className="text-button ease-more" aria-expanded={allCurves} onClick={() => setAllCurves(!allCurves)}><ChevronDown size={13} style={{ transform: allCurves ? "rotate(180deg)" : undefined }} /> {allCurves ? "Свернуть кривые" : "Все кривые"}</button>
+      <button type="button" className="text-button ease-more" aria-expanded={allCurves} onClick={() => setAllCurves(!allCurves)}><ChevronDown size={14} style={{ transform: allCurves ? "rotate(180deg)" : undefined }} /> {allCurves ? "Свернуть кривые" : "Все кривые"}</button>
       {allCurves && <div className="ease-table" role="group" aria-label="Все кривые">
         <span />{DIRECTIONS.map((direction) => <span key={direction.id} className="ease-column">{direction.label}</span>)}
         {EASE_FAMILIES.map((family) => <div className="ease-family" key={family}>
@@ -82,7 +83,7 @@ export function AnimationSection({ animation, selection, unit, videoLength, onEa
         onChange={(value) => onKeyValue(keys[0], singleInfo.length ? value / unit : value)} />}
       <div className="button-row">
         <button type="button" className="small-button" onClick={() => onSeek(firstTime)}><Diamond size={12} /> {firstTime === lastTime ? "К ключу" : "К началу"}</button>
-        <button type="button" className="small-button" onClick={() => onDeleteKeys(keys)}><Trash size={12} /> Удалить</button>
+        <button type="button" className="small-button" onClick={() => onDeleteKeys(keys)}><Trash size={14} /> Удалить</button>
       </div>
     </section>}
 
@@ -99,6 +100,6 @@ export function AnimationSection({ animation, selection, unit, videoLength, onEa
       {animation.blur.enabled && <Control label="Сила размытия" value={animation.blur.amount} min={0} max={100} unit="%" onChange={(amount) => onBlur({ amount }, "blurAmount")} />}
     </section>}
 
-    {!selection && videoLength !== null && Math.abs(videoLength - animation.duration) > TIME_STEP && <button type="button" className="text-button" onClick={onFitVideo}><Film size={13} /> Длина ролика по видео · {seconds(videoLength, 1)}</button>}
+    {!selection && videoLength !== null && Math.abs(videoLength - animation.duration) > TIME_STEP && <button type="button" className="text-button" onClick={onFitVideo}><Film size={14} /> Длина ролика по видео · {seconds(videoLength, 1)}</button>}
   </div>;
 }

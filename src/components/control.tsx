@@ -5,6 +5,7 @@ import { motion } from "motion/react";
 import type { ItemRect } from "@/hooks/use-fluid-hover";
 import { clamp } from "@/lib/settings";
 import { spring } from "@/lib/springs";
+import { tip } from "./tooltip-layer";
 
 interface ControlProps {
   label: string; value: number; min: number; max: number; step?: number; unit?: string; disabled?: boolean; onChange: (value: number) => void;
@@ -31,10 +32,10 @@ export function Control({ label, value, min, max, step = 1, unit = "", disabled 
   return <div className={`control${disabled ? " is-disabled" : ""}${scrubbing ? " is-scrubbing" : ""}`} data-control={label}>
     <div className="control-heading">
       {onKey && <button type="button" className={`control-key ${keyState}`} disabled={disabled} onClick={onKey}
-        aria-label={keyState === "key" ? `Убрать ключ: ${label}` : `Поставить ключ: ${label}`} title={keyState === "key" ? "Убрать ключ в этом времени" : keyState === "animated" ? "Поставить ключ в этом времени" : "Анимировать: поставить ключ"}>
+        aria-label={keyState === "key" ? `Убрать ключ: ${label}` : `Поставить ключ: ${label}`} {...tip(keyState === "key" ? "Убрать ключ в этом времени" : keyState === "animated" ? "Поставить ключ в этом времени" : "Анимировать: поставить ключ")}>
         <svg viewBox="0 0 10 10" aria-hidden="true"><path d="M5 0.8L9.2 5 5 9.2 0.8 5Z" /></svg>
       </button>}
-      <label htmlFor={id} className="scrub-label" title="Тяните для изменения · Shift для точной настройки"
+      <label htmlFor={id} className="scrub-label" {...tip("Тяните, чтобы изменить", "Shift — точнее")}
         onPointerDown={(event) => { if (disabled || event.button !== 0) return; event.preventDefault(); event.currentTarget.setPointerCapture(event.pointerId); scrub.current = { x: event.clientX, value, moved: false }; }}
         onPointerMove={(event) => { if (!scrub.current) return; const delta = event.clientX - scrub.current.x; if (Math.abs(delta) > 2 && !scrub.current.moved) { scrub.current.moved = true; setScrubbing(true); } if (scrub.current.moved) onChange(clamp(Math.round((scrub.current.value + delta * step * (event.shiftKey ? 0.1 : 1)) * 100) / 100, min, max)); }}
         onPointerUp={(event) => { const current = scrub.current; scrub.current = null; setScrubbing(false); if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId); if (current && !current.moved) inputRef.current?.focus(); }}
