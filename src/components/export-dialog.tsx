@@ -3,6 +3,7 @@
 import { forwardRef } from "react";
 import { ChevronDown, Film, X } from "lucide-react";
 import { Segmented } from "./control";
+import { tip } from "./tooltip-layer";
 import { seconds } from "./timeline";
 import type { ExportFormat } from "@/lib/scene";
 import type { Aspect } from "@/lib/settings";
@@ -37,7 +38,7 @@ export const ExportDialog = forwardRef<HTMLDialogElement, ExportDialogProps>(fun
   const formatAvailable = options.format === "png" || supported[options.format];
   const set = (patch: Partial<ExportOptions>) => onOptions({ ...options, ...patch });
   return <dialog ref={ref} className="export-dialog" aria-labelledby="export-dialog-title" onCancel={(event) => { if (busy) event.preventDefault(); else onClose(); }}>
-    <div className="dialog-heading"><h2 id="export-dialog-title">Экспорт анимации</h2><button className="icon-button" aria-label="Закрыть" disabled={busy} onClick={onClose}><X size={18} /></button></div>
+    <div className="dialog-heading"><h2 id="export-dialog-title">Экспорт анимации</h2><button className="icon-button" aria-label="Закрыть" {...tip("Закрыть", "Esc")} disabled={busy} onClick={onClose}><X size={16} /></button></div>
     <fieldset disabled={busy} className="export-fields">
       <div className="export-field">
         <span className="export-field-label">Формат</span>
@@ -50,8 +51,8 @@ export const ExportDialog = forwardRef<HTMLDialogElement, ExportDialogProps>(fun
         <span className="export-field-label">Формат кадра</span>
         <Segmented className="aspect-options" label="Формат кадра ролика" value={aspect} items={(["16:9", "4:3", "1:1", "4:5", "9:16"] as Aspect[]).map((item) => ({ id: item, label: item }))} onChange={onAspect} />
       </div>
-      <div className="resolution-row"><label htmlFor="export-resolution">Разрешение ролика</label><div className="select-wrap"><select id="export-resolution" value={resolution} onChange={(event) => onResolution(Number(event.target.value))}><option value={1200}>1200 px</option><option value={1920}>1920 px</option><option value={2400}>2400 px</option><option value={3840}>4K · 3840 px</option></select><ChevronDown size={12} /></div></div>
-      <div className="resolution-row"><label htmlFor="export-fps">Кадров в секунду</label><div className="select-wrap"><select id="export-fps" value={options.fps} onChange={(event) => set({ fps: Number(event.target.value) })}><option value={24}>24</option><option value={30}>30</option><option value={60}>60</option></select><ChevronDown size={12} /></div></div>
+      <div className="resolution-row"><label htmlFor="export-resolution">Разрешение ролика</label><div className="select-wrap"><select id="export-resolution" value={resolution} onChange={(event) => onResolution(Number(event.target.value))}><option value={1200}>1200 px</option><option value={1920}>1920 px</option><option value={2400}>2400 px</option><option value={3840}>4K · 3840 px</option></select><ChevronDown size={14} /></div></div>
+      <div className="resolution-row"><label htmlFor="export-fps">Кадров в секунду</label><div className="select-wrap"><select id="export-fps" value={options.fps} onChange={(event) => set({ fps: Number(event.target.value) })}><option value={24}>24</option><option value={30}>30</option><option value={60}>60</option></select><ChevronDown size={14} /></div></div>
       <dl className="export-summary">
         <div><dt>Размер</dt><dd>{size.width} × {size.height}</dd></div>
         <div><dt>Длительность</dt><dd>{seconds(duration)} · {frames} {plural(frames, ["кадр", "кадра", "кадров"])}</dd></div>

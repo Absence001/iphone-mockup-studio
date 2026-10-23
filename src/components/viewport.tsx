@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import { Hand, Minus, Move, Orbit, Plus, Rotate3d, Scaling, Scan, RotateCcw } from "lucide-react";
 import { FluidStrip } from "./fluid-strip";
+import { tip } from "./tooltip-layer";
 import { StudioScene } from "@/lib/scene";
 import { aspectRatio, clamp, exportSize, type CameraSettings, type DeviceTransform, type Settings } from "@/lib/settings";
 import type { ScreenImage } from "@/lib/history";
@@ -45,8 +46,12 @@ const BUTTON_ZOOM = 1.25;
  * снизу — под верхнюю строку и масштаб. Кадр в целом виде не заходит под них.
  */
 const SIDE = 76;
-/** Сверху ещё и место под подпись кадра, чтобы она не заходила под верхнюю строку. */
-const TOP = 84;
+/**
+ * Сверху поле считается от измеренной верхней строки: она переносится на узком
+ * окне. Над кадром — подпись (16px строка и 6px до кадра) и 12px до строки.
+ */
+const LABEL_SPACE = 34;
+const TOP = 90;
 const BOTTOM = 64;
 /** Насколько увеличенный кадр можно увести за край рабочей области. */
 const OVERSCROLL = 48;
@@ -66,7 +71,8 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
   const canvasRef = useRef<HTMLDivElement>(null);
   const initial = useRef(settings);
   const [generation, setGeneration] = useState(0);
-  const [available, setAvailable] = useState({ width: 900, height: 650 });
+  const toplineRef = useRef<HTMLDivElement>(null);
+  const [available, setAvailable] = useState({ width: 900, height: 650, top: TOP });
   const availableRef = useRef(available);
   const [view, setView] = useState<View>(HOME);
   const viewRef = useRef(view);
@@ -84,7 +90,9 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
   const panRef = useRef<{ pointer: number; x: number; y: number; startX: number; startY: number } | null>(null);
   const dragDepth = useRef(0);
   const ratio = aspectRatio(settings.aspect);
-  const width = Math.min(Math.max(160, available.width - SIDE * 2), Math.max(160, available.height - TOP - BOTTOM) * ratio);
+  const width = Math.min(Math.max(160, available.width - SIDE * 2), Math.max(160, available.height - available.top - BOTTOM) * ratio);
+  /** Поля сверху и снизу разные: кадр стоит по центру свободного места, а не всей области. */
+  const centerY = (available.top - BOTTOM) / 2;
   const height = width / ratio;
   const frameSize = useRef({ width, height });
   frameSize.current = { width, height };
@@ -103,8 +111,8 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
     const { width: frameWidth, height: frameHeight } = frameSize.current;
     const area = availableRef.current;
     const limitX = Math.max(0, (frameWidth * next.zoom - (area.width - SIDE * 2)) / 2 + OVERSCROLL);
-    const limitY = Math.max(0, (frameHeight * next.zoom - (area.height - TOP - BOTTOM)) / 2 + OVERSCROLL);
-    const fits = frameWidth * next.zoom <= area.width - SIDE * 2 + 1 && frameHeight * next.zoom <= area.height - TOP - BOTTOM + 1;
+    const limitY = Math.max(0, (frameHeight * next.zoom - (area.height - area.top - BOTTOM)) / 2 + OVERSCROLL);
+    const fits = frameWidth * next.zoom <= area.width - SIDE * 2 + 1 && frameHeight * next.zoom <= area.height - area.top - BOTTOM + 1;
     return { zoom: next.zoom, x: fits ? 0 : clamp(next.x, -limitX, limitX), y: fits ? 0 : clamp(next.y, -limitY, limitY) };
   }, []);
 
@@ -196,10 +204,13 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
     const host = workspaceRef.current;
     if (!host) return;
     const observer = new ResizeObserver(() => {
-      availableRef.current = { width: host.clientWidth, height: host.clientHeight };
+      const topline = toplineRef.current;
+      const top = topline ? Math.max(TOP, Math.ceil(topline.offsetTop + topline.offsetHeight + LABEL_SPACE)) : TOP;
+      availableRef.current = { width: host.clientWidth, height: host.clientHeight, top };
       setAvailable(availableRef.current);
     });
     observer.observe(host);
+    if (toplineRef.current) observer.observe(toplineRef.current);
     return () => observer.disconnect();
   }, []);
   // Окно или нижняя панель поменяли место под кадр: сдвиг пересчитывается
@@ -216,7 +227,7 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
       if (event.ctrlKey || event.metaKey) {
         const bounds = host.getBoundingClientRect();
         const delta = clamp(event.deltaY * unit, -120, 120);
-        zoomBy(Math.exp(-delta * WHEEL_ZOOM), event.clientX - bounds.left - bounds.width / 2, event.clientY - bounds.top - bounds.height / 2);
+        zoomBy(Math.exp(-delta * WHEEL_ZOOM), event.clientX - bounds.left - bounds.width / 2, event.clientY - bounds.top - bounds.height / 2 - (availableRef.current.top - BOTTOM) / 2);
       } else {
         const stepX = (event.shiftKey ? event.deltaY : event.deltaX) * unit;
         const stepY = (event.shiftKey ? 0 : event.deltaY) * unit;
@@ -266,7 +277,7 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
 
   // Подпись кадра стоит над его левым верхним углом и едет вместе с ним.
   const frameLeft = available.width / 2 + view.x - width * view.zoom / 2;
-  const frameTop = available.height / 2 + view.y - height * view.zoom / 2;
+  const frameTop = available.height / 2 + centerY + view.y - height * view.zoom / 2;
 
   return <div className={`workspace${hand || space ? " hand-mode" : ""}${panning ? " panning" : ""}`} ref={workspaceRef} aria-label="Рабочая область" tabIndex={0}
     onContextMenu={(event) => event.preventDefault()}
@@ -293,15 +304,15 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
     onDragOver={(event) => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; } }}
     onDragLeave={() => { dragDepth.current--; if (dragDepth.current <= 0) { dragDepth.current = 0; setDraggingFile(false); } }}
     onDrop={(event) => { event.preventDefault(); dragDepth.current = 0; setDraggingFile(false); const file = event.dataTransfer.files[0]; if (file) onDropFile(file); }}>
-    <div className="workspace-topline"><div>{topLeft}</div>{topCenter && <div className="workspace-center">{topCenter}</div>}<div>{topRight}</div></div>
+    <div className="workspace-topline" ref={toplineRef}><div className="workspace-start">{topLeft}</div>{topCenter && <div className="workspace-center">{topCenter}</div>}<div className="workspace-end">{topRight}</div></div>
     <FluidStrip axis="y" className="tool-rail" role="toolbar" aria-label="Инструменты рабочей области">
-      {TOOLS.map(({ id, label, key, icon: Icon }) => <button key={id} className={tool === id ? "active" : ""} aria-label={`${label} (${key})`} aria-pressed={tool === id} title={`${label} · ${key}${id === "hand" ? " / Space" : ""}`} onClick={() => setTool(id)}><Icon size={18} /></button>)}
+      {TOOLS.map(({ id, label, key, icon: Icon }) => <button key={id} className={tool === id ? "active" : ""} aria-label={`${label} (${key})`} aria-pressed={tool === id} {...tip(label, `${key}${id === "hand" ? " / Space" : ""}`, "right")} onClick={() => setTool(id)}><Icon size={16} /></button>)}
     </FluidStrip>
     <div className="frame-label" aria-hidden="true" style={{ transform: `translate(${Math.round(frameLeft)}px, ${Math.round(frameTop - 22)}px)` }}>
       <span>{settings.aspect}</span><span>{output.width} × {output.height}</span>
     </div>
     <div className="artboard" data-clarity-mask="true" data-testid="artboard" data-view-zoom={view.zoom.toFixed(3)} data-view-x={view.x.toFixed(1)} data-view-y={view.y.toFixed(1)}
-      style={{ width, height, transform: `translate(-50%, -50%) translate(${view.x}px, ${view.y}px) scale(${view.zoom})` }}>
+      style={{ width, height, transform: `translate(-50%, -50%) translate(${view.x}px, ${view.y + centerY}px) scale(${view.zoom})` }}>
       <div className={`render-surface${settings.background.mode === "transparent" ? " checkerboard" : ""}`} ref={canvasRef} />
       {modelState.status !== "ready" && <div className="scene-status" role="status">
         {modelState.status === "loading" ? <><span className="spinner" /><span>Загружаем модель…</span></> : <><span>{modelState.message}</span><button className="small-button" onClick={() => setGeneration((value) => value + 1)}><RotateCcw size={14} /> Повторить</button></>}
@@ -309,8 +320,8 @@ export function Viewport({ settings, image, backdrop, sceneRef, onCamera, onMode
     </div>
     {draggingFile && <div className="drop-overlay"><span><Plus size={32} /> Отпустите, чтобы заменить экран</span></div>}
     <div className="workspace-bottom">
-      <FluidStrip axis="x" className="zoom-toolbar"><button aria-label="Уменьшить рабочую область" title="Уменьшить · −" onClick={() => zoomBy(1 / BUTTON_ZOOM)}><Minus size={15} /></button><button className="zoom-value" onClick={fit} title="Уместить кадр · Shift+1">{Math.round(view.zoom * 100)}%</button><button aria-label="Увеличить рабочую область" title="Увеличить · +" onClick={() => zoomBy(BUTTON_ZOOM)}><Plus size={15} /></button><span /><button aria-label="Уместить холст" title="Уместить кадр · Shift+1" onClick={fit}><Scan size={16} /></button></FluidStrip>
-      <button className="reset-view icon-button" onClick={onResetCamera} aria-label="Сбросить камеру" title="Сбросить камеру"><RotateCcw size={16} /></button>
+      <FluidStrip axis="x" className="zoom-toolbar"><button aria-label="Уменьшить рабочую область" {...tip("Уменьшить", "−")} onClick={() => zoomBy(1 / BUTTON_ZOOM)}><Minus size={16} /></button><button className="zoom-value" onClick={fit} {...tip("Уместить кадр", "Shift+1")}>{Math.round(view.zoom * 100)}%</button><button aria-label="Увеличить рабочую область" {...tip("Увеличить", "+")} onClick={() => zoomBy(BUTTON_ZOOM)}><Plus size={16} /></button><span /><button aria-label="Уместить холст" {...tip("Уместить кадр", "Shift+1")} onClick={fit}><Scan size={16} /></button></FluidStrip>
+      <button className="reset-view icon-button" onClick={onResetCamera} aria-label="Сбросить камеру" {...tip("Сбросить камеру")}><RotateCcw size={16} /></button>
     </div>
   </div>;
 }

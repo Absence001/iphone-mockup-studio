@@ -5,6 +5,7 @@ import { Music2, Volume2, VolumeX } from "lucide-react";
 import { audioLength, normalizeAudio, type AudioClip } from "@/lib/audio";
 import { clamp } from "@/lib/settings";
 import { roundTime } from "@/lib/animation";
+import { tip } from "./tooltip-layer";
 
 export type AudioChangePhase = "start" | "change" | "end";
 interface AudioTrackProps {
@@ -61,9 +62,9 @@ export function AudioTrack({ clip, buffer, pps, duration, selected, onSelect, on
 
   return <div className="timeline-row audio">
     <div className="timeline-label">
-      <Music2 size={13} aria-hidden="true" />
+      <Music2 size={14} aria-hidden="true" />
       <button type="button" className="timeline-name" aria-pressed={selected} onClick={onSelect}>Аудио</button>
-      <button type="button" className="timeline-keybutton" aria-label={clip.muted ? "Включить аудио" : "Выключить аудио"} onClick={() => { onChange(clip, "start"); onChange({ ...clip, muted: !clip.muted }, "end"); }}>{clip.muted ? <VolumeX size={13} /> : <Volume2 size={13} />}</button>
+      <button type="button" className="timeline-keybutton" aria-label={clip.muted ? "Включить аудио" : "Выключить аудио"} {...tip(clip.muted ? "Включить звук" : "Выключить звук")} onClick={() => { onChange(clip, "start"); onChange({ ...clip, muted: !clip.muted }, "end"); }}>{clip.muted ? <VolumeX size={14} /> : <Volume2 size={14} />}</button>
     </div>
     <div className="timeline-lane">
       <div className={`audio-clip${selected ? " selected" : ""}${clip.muted ? " muted" : ""}`} style={{ left: 12 + clip.offset * pps, width: Math.max(12, Math.min(audioLength(clip), Math.max(0, duration - clip.offset)) * pps) }}>
@@ -71,8 +72,8 @@ export function AudioTrack({ clip, buffer, pps, duration, selected, onSelect, on
           <svg viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">{peaks.map((peak, index) => <path key={index} d={`M${index} ${12 - peak * 10}v${Math.max(1, peak * 20)}`} />)}</svg>
           <span>{clip.name}</span>
         </button>
-        <button type="button" className="audio-trim start" aria-label="Обрезать начало аудио" onClick={onSelect} onPointerDown={(event) => drag(event, "start")} />
-        <button type="button" className="audio-trim end" aria-label="Обрезать конец аудио" onClick={onSelect} onPointerDown={(event) => drag(event, "end")} />
+        <button type="button" className="audio-trim start" aria-label="Обрезать начало аудио" {...tip("Тяните, чтобы обрезать начало")} onClick={onSelect} onPointerDown={(event) => drag(event, "start")} />
+        <button type="button" className="audio-trim end" aria-label="Обрезать конец аудио" {...tip("Тяните, чтобы обрезать конец")} onClick={onSelect} onPointerDown={(event) => drag(event, "end")} />
       </div>
     </div>
   </div>;

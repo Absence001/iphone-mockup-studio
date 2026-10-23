@@ -21,10 +21,11 @@ const buttonVariants = cva(
     // whitespace-nowrap: a label never breaks onto 2 lines. It also makes
     // the label the button's narrowest width, so a tight row moves the
     // button (or overflows) instead of squeezing it.
-    "group relative isolate inline-flex items-center justify-center outline-none cursor-pointer select-none whitespace-nowrap",
+    "group relative isolate inline-flex items-center justify-center cursor-pointer select-none whitespace-nowrap",
     "transition-colors duration-80",
     "disabled:opacity-50 disabled:pointer-events-none",
-    "focus-visible:ring-1 focus-visible:ring-[color:var(--focus-ring,#6B97FF)]",
+    // Focus is drawn by the app-wide button:focus-visible outline in
+    // globals.css; a ring here as well showed two rings around the control.
   ],
   {
     variants: {

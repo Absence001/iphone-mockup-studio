@@ -4,6 +4,7 @@ import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import { Moon, Sun } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import { Button } from "./ui/button";
+import { tip } from "./tooltip-layer";
 
 const THEME_KEY = "mockup-theme";
 /** Длительность кросс-фейда палитры при смене темы, см. .theme-transition. */
@@ -41,7 +42,7 @@ export function ThemeToggle() {
   const label = dark ? "Включить светлую тему" : "Включить тёмную тему";
   const Icon = dark ? Sun : Moon;
 
-  return <Button variant="ghost" size="icon-compact" aria-label={label} title={label} onClick={toggle}>
+  return <Button variant="ghost" size="icon-compact" aria-label={label} {...tip(dark ? "Светлая тема" : "Тёмная тема", undefined, "bottom")} onClick={toggle}>
     <span className="theme-icon" aria-hidden="true">
       <AnimatePresence initial={false}>
         <motion.span

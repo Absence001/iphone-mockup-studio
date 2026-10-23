@@ -3,6 +3,7 @@
 import { Fragment } from "react";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectSeparator, SelectTrigger } from "./ui/select";
 import type { IconComponent } from "@/lib/icon-context";
+import { tip } from "./tooltip-layer";
 
 export interface ChoiceItem { id: string; label: string; color?: string; group?: string; hint?: string }
 
@@ -10,7 +11,7 @@ export function FluidChoice({ label, value, items, onChange, disabled, placehold
   label: string; value: string; items: ChoiceItem[]; onChange: (value: string) => void;
   disabled?: boolean; placeholder?: string; icon?: IconComponent; className?: string;
 }) {
-  const row = (item: ChoiceItem) => <SelectItem key={item.id} index={items.indexOf(item)} value={item.id} title={item.hint}>
+  const row = (item: ChoiceItem) => <SelectItem key={item.id} index={items.indexOf(item)} value={item.id} {...(item.hint ? tip(item.hint, undefined, "right") : {})}>
     {item.color ? <span className="finish-choice"><span style={{ background: item.color }} aria-hidden="true" />{item.label}</span> : item.label}
   </SelectItem>;
   // Порядок групп — порядок первого появления; индексы строк сквозные, их
@@ -18,7 +19,7 @@ export function FluidChoice({ label, value, items, onChange, disabled, placehold
   const groups = [...new Set(items.map((item) => item.group))];
   return <Select value={value} onValueChange={onChange} disabled={disabled} size="compact">
     <SelectTrigger aria-label={label} placeholder={placeholder} icon={icon} className={className} />
-    <SelectContent className="choice-content">
+    <SelectContent className={`choice-content${className ? ` ${className}-menu` : ""}`}>
       {groups.length > 1 || groups[0] !== undefined
         ? groups.map((group, index) => <Fragment key={group}>
             {/* Линия между группами: без неё подписи теряются и непонятно,
